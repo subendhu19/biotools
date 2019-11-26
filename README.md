@@ -8,6 +8,6 @@ This repository contains experiments to build resources for Bio-NLP specific tas
 3. DistillBERT
 4. GPT/GPT-2
 
-## Data finetuned on
+## Finetuning Data
 1. Pubmed abstracts
 2. MIMIC-III notes
