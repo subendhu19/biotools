@@ -34,7 +34,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
-
+from torch.nn.parallel import data_parallel
 try:
     from torch.utils.tensorboard import SummaryWriter
 except:
@@ -48,9 +48,13 @@ from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                                   OpenAIGPTConfig, OpenAIGPTLMHeadModel, OpenAIGPTTokenizer,
                                   RobertaConfig, RobertaForMaskedLM, RobertaTokenizer,
                                   DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer)
-
+from copy import deepcopy
+from torch.autograd import Variable
 
 logger = logging.getLogger(__name__)
+
+
+GRAD_CLIP_VALUE_EWC=10
 
 
 MODEL_CLASSES = {
@@ -60,6 +64,64 @@ MODEL_CLASSES = {
     'roberta': (RobertaConfig, RobertaForMaskedLM, RobertaTokenizer),
     'distilbert': (DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer)
 }
+
+
+def get_diag_fisher(model,old_task_dataset_len,old_task_dataset_iterator,args,tokenizer):
+    logger.info('Computing Diagonal Fisher estimates for EWC ...')
+    #cl_epoch_iterator = iter(old_task_dataset_iterator)
+
+    cl_epoch_iterator = tqdm(old_task_dataset_iterator, desc="Iteration")
+
+    params = {n: p for n, p in model.named_parameters() if p.requires_grad and "LayerNorm" not in n}
+    if torch.cuda.is_available():
+        devices=list(set([p.device for n, p in model.named_parameters() if p.requires_grad]))
+        src_device=devices[0]
+        if devices.__len__()>1:
+            logger.warning('Model is in {0} devices. Behavior may be unstable for device>1'.format(devices))
+    else:
+        src_device= -1
+    means = {}
+    precision_matrices = {}
+    for n, p in params.items():
+        means[n] = p.clone().detach()
+        precision_matrices[n] = torch.zeros_like(p,dtype=p.dtype,device=p.device)
+
+
+    model.eval()
+    for step_idx,batch in enumerate(cl_epoch_iterator):
+        model.zero_grad()
+        cl_inputs, cl_labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+        cl_inputs = cl_inputs.to(args.device)
+        cl_labels = cl_labels.to(args.device)
+        if src_device==-1:
+            outputs = model(cl_inputs,masked_lm_labels=cl_labels)
+        else:
+            outputs = data_parallel(model, {'input_ids':cl_inputs,'masked_lm_labels': cl_labels}, device_ids=None, output_device=src_device)
+        loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+
+        if args.n_gpu > 1:
+            loss = loss.mean()
+
+        loss.backward()
+        with torch.no_grad():
+            for n, p in model.named_parameters():
+                if p.grad is not None and n in precision_matrices:
+                    ## Clamping not mentioned in any EWC code or paper, but pretty sure this will be an issue in deep NLP archs.
+                    precision_matrices[n] += \
+                        torch.clamp(p.grad.data,-GRAD_CLIP_VALUE_EWC,GRAD_CLIP_VALUE_EWC) ** 2 / old_task_dataset_len
+
+    precision_matrices = {n: p for n, p in precision_matrices.items()}
+    return means,precision_matrices
+
+def penalty(model,means,precision_matrices):
+    loss = 0
+    for n, p in model.named_parameters():
+        if n in precision_matrices:
+            relevant_fisher=precision_matrices[n]
+            _loss =  (p - means[n]) ** 2
+            _loss = _loss*relevant_fisher
+            loss += _loss.sum()
+    return loss
 
 
 class TextDataset(Dataset):
@@ -181,7 +243,12 @@ def train(args, train_dataset, model, tokenizer, cl_train_dataset = None):
 
     if cl_train_dataset:
         cl_train_sampler = RandomSampler(cl_train_dataset) if args.local_rank == -1 else DistributedSampler(cl_train_dataset)
-        cl_train_dataloader = DataLoader(cl_train_dataset, sampler=cl_train_sampler, batch_size=args.cl_train_batch_size)
+        if args.ewc:
+            #EWC requires backwards() too so larger eval batch size cannot be used
+            cl_train_dataloader = DataLoader(cl_train_dataset, sampler=cl_train_sampler,
+                                             batch_size=args.train_batch_size)
+        else:
+            cl_train_dataloader = DataLoader(cl_train_dataset, sampler=cl_train_sampler, batch_size=args.cl_train_batch_size)
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -204,6 +271,13 @@ def train(args, train_dataset, model, tokenizer, cl_train_dataset = None):
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
+    ## Iterating over the old task dataset. Parallel_apply is used. Make sure to keep this before DataParallel call.
+    if args.ewc is True:
+        assert cl_train_dataset is not None, "CL dataset needed for EWC"
+        ewc_means, ewc_F= get_diag_fisher(model,old_task_dataset_len=len(cl_train_dataset),
+                                          old_task_dataset_iterator=cl_train_dataloader,args=args,tokenizer=tokenizer)
+
+
     # multi-gpu training (should be after apex fp16 initialization)
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
@@ -213,6 +287,8 @@ def train(args, train_dataset, model, tokenizer, cl_train_dataset = None):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
                                                           output_device=args.local_rank,
                                                           find_unused_parameters=True)
+
+
 
     # Train!
     logger.info("***** Running training *****")
@@ -245,7 +321,7 @@ def train(args, train_dataset, model, tokenizer, cl_train_dataset = None):
             outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
             loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
-            if cl_train_dataset:
+            if cl_train_dataset and args.ewc is False: # cl dataset provided and EWC is off. So rehersal is on.
                 try:
                     cl_batch = next(cl_epoch_iterator)
                 except StopIteration:
@@ -264,6 +340,14 @@ def train(args, train_dataset, model, tokenizer, cl_train_dataset = None):
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
+
+            if cl_train_dataset and args.ewc:
+                ewc_penalty=penalty(model, ewc_means, ewc_F)
+
+                if step%50000 in [0,1,2]:
+                    print('Showing loss components for few steps Loss: {0}, EWC_Loss {1}, effective EWC_Loss {2}'.format(loss,ewc_penalty,args.cl_loss_multiplier*ewc_penalty))
+
+                loss += args.cl_loss_multiplier * ewc_penalty
 
             if args.fp16:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -388,6 +472,9 @@ def main():
                         help="The output directory where the model predictions and checkpoints will be written.")
 
     ## Other parameters
+    parser.add_argument("--ewc", action='store_true', help="Whether to run ewc CL training.")
+    parser.add_argument("--num_ewc_steps", default=100, type=int,
+                        help="Total number of steps to perform for estimating the EWC Laplace Approximation. Entire dataset is used if -1")
     parser.add_argument("--cl_train_data_file", default=None, type=str,required=False,
                         help="The input cl training data file (a text file).")
     parser.add_argument("--eval_data_file", default=None, type=str,
