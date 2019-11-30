@@ -61,6 +61,11 @@ MODEL_CLASSES = {
     'distilbert': (DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer)
 }
 
+from torch import  nn
+class MyDataParallel(nn.DataParallel):
+    def __getattr__(self, name):
+        #new_name=name.split('internal_')
+        return getattr(self.module, name)
 
 class TextDataset(Dataset):
     def __init__(self, tokenizer, args, file_path='train', block_size=512):
@@ -206,7 +211,7 @@ def train(args, train_dataset, model, tokenizer, cl_train_dataset = None):
 
     # multi-gpu training (should be after apex fp16 initialization)
     if args.n_gpu > 1:
-        model = torch.nn.DataParallel(model)
+        model = MyDataParallel(model)
 
     # Distributed training (should be after apex fp16 initialization)
     if args.local_rank != -1:
