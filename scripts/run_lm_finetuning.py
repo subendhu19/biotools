@@ -341,7 +341,7 @@ def evaluate(args, model, tokenizer, prefix="",cl_flag=False):
 
     # multi-gpu evaluate
     if args.n_gpu > 1:
-        model = torch.nn.DataParallel(model)
+        model = MyDataParallel(model)
 
     # Eval!
     logger.info("***** Running evaluation {0} ***** CL_FLAG {1}".format(prefix,cl_flag))
