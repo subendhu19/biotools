@@ -49,8 +49,14 @@ from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                                   RobertaConfig, RobertaForMaskedLM, RobertaTokenizer,
                                   DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer)
 
+from torch import nn
 
 logger = logging.getLogger(__name__)
+
+
+class MyDataParallel(nn.DataParallel):
+    def __getattr__(self, name):
+        return getattr(self.module, name)
 
 
 MODEL_CLASSES = {
@@ -195,7 +201,7 @@ def train(args, train_dataset, model, tokenizer):
 
     # multi-gpu training (should be after apex fp16 initialization)
     if args.n_gpu > 1:
-        model = torch.nn.DataParallel(model)
+        model = MyDataParallel(model)
 
     # Distributed training (should be after apex fp16 initialization)
     if args.local_rank != -1:
@@ -303,7 +309,7 @@ def evaluate(args, model, tokenizer, prefix=""):
 
     # multi-gpu evaluate
     if args.n_gpu > 1:
-        model = torch.nn.DataParallel(model)
+        model = MyDataParallel(model)
 
     # Eval!
     logger.info("***** Running evaluation {} *****".format(prefix))
