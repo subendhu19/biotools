@@ -49,15 +49,7 @@ from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                                   RobertaConfig, RobertaForMaskedLM, RobertaTokenizer,
                                   DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer)
 
-from torch import nn
-
 logger = logging.getLogger(__name__)
-
-
-class MyDataParallel(nn.DataParallel):
-    def __getattr__(self, name):
-        return getattr(self.module, name)
-
 
 MODEL_CLASSES = {
     'gpt2': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
@@ -201,7 +193,7 @@ def train(args, train_dataset, model, tokenizer):
 
     # multi-gpu training (should be after apex fp16 initialization)
     if args.n_gpu > 1:
-        model = MyDataParallel(model)
+        model = torch.nn.DataParallel(model)
 
     # Distributed training (should be after apex fp16 initialization)
     if args.local_rank != -1:
@@ -221,8 +213,10 @@ def train(args, train_dataset, model, tokenizer):
 
     global_step = 0
     tr_loss, logging_loss = 0.0, 0.0
-    model.resize_token_embeddings(len(tokenizer))
-    model.zero_grad()
+    model.module.resize_token_embeddings(len(tokenizer)) if hasattr(model, 'module') \
+        else model.resize_token_embeddings(len(tokenizer))
+    model.module.zero_grad() if hasattr(model, 'module') \
+        else model.zero_grad()
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
     for _ in train_iterator:
@@ -231,7 +225,7 @@ def train(args, train_dataset, model, tokenizer):
             inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
-            model.train()
+            model.module.train() if hasattr(model, 'module') else model.train()
             outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
             loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
@@ -251,10 +245,12 @@ def train(args, train_dataset, model, tokenizer):
                 if args.fp16:
                     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
                 else:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(model.module.parameters() if hasattr(model, 'module')
+                                                   else model.parameters(), args.max_grad_norm)
                 optimizer.step()
                 scheduler.step()  # Update learning rate schedule
-                model.zero_grad()
+                model.module.zero_grad() if hasattr(model, 'module') \
+                    else model.zero_grad()
                 global_step += 1
 
                 if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
@@ -309,7 +305,7 @@ def evaluate(args, model, tokenizer, prefix=""):
 
     # multi-gpu evaluate
     if args.n_gpu > 1:
-        model = MyDataParallel(model)
+        model = torch.nn.DataParallel(model)
 
     # Eval!
     logger.info("***** Running evaluation {} *****".format(prefix))
@@ -317,7 +313,7 @@ def evaluate(args, model, tokenizer, prefix=""):
     logger.info("  Batch size = %d", args.eval_batch_size)
     eval_loss = 0.0
     nb_eval_steps = 0
-    model.eval()
+    model.module.eval() if hasattr(model, 'module') else model.eval()
 
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
         inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
