@@ -98,10 +98,15 @@ class TextDataset(Dataset):
         return torch.tensor(self.examples[item])
 
 
-def load_and_cache_examples(args, tokenizer, evaluate=False):
-    dataset = TextDataset(tokenizer, args, file_path=args.eval_data_file if evaluate else args.train_data_file, block_size=args.block_size)
-    return dataset
+def load_and_cache_examples(args, tokenizer, evaluate=False,cl=False):
+    if cl:
+        file_path = args.cl_eval_data_file if evaluate else args.cl_train_data_file
+    else:
+        file_path = args.eval_data_file if evaluate else args.train_data_file
 
+    dataset = TextDataset(tokenizer, args, file_path=file_path, block_size=args.block_size)
+
+    return dataset
 
 def set_seed(args):
     random.seed(args.seed)
@@ -163,14 +168,20 @@ def mask_tokens(inputs, tokenizer, args):
     return inputs, labels
 
 
-def train(args, train_dataset, model, tokenizer):
+def train(args, train_dataset, model, tokenizer, cl_train_dataset = None):
     """ Train the model """
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
+    args.cl_train_batch_size = args.cl_per_gpu_train_batch_size * max(1, args.n_gpu)
+
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+
+    if cl_train_dataset:
+        cl_train_sampler = RandomSampler(cl_train_dataset) if args.local_rank == -1 else DistributedSampler(cl_train_dataset)
+        cl_train_dataloader = DataLoader(cl_train_dataset, sampler=cl_train_sampler, batch_size=args.cl_train_batch_size)
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -221,13 +232,31 @@ def train(args, train_dataset, model, tokenizer):
     set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
+        if cl_train_dataset:
+            cl_epoch_iterator = iter(cl_train_dataloader)
         for step, batch in enumerate(epoch_iterator):
+
             inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
             model.train()
             outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
             loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+
+            if cl_train_dataset:
+                try:
+                    cl_batch = next(cl_epoch_iterator)
+                except StopIteration:
+                    logger.info('Completed CL train batch iteration. Restarting ...')
+                    cl_epoch_iterator = iter(cl_train_dataloader)
+                    cl_batch = next(cl_epoch_iterator)
+
+                cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) if args.mlm else (cl_batch, cl_batch)
+                cl_inputs = cl_inputs.to(args.device)
+                cl_labels = cl_labels.to(args.device)
+                model.train()
+                cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else model(cl_inputs, labels=cl_labels)
+                loss +=cl_outputs[0]*args.cl_loss_multiplier
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -257,6 +286,10 @@ def train(args, train_dataset, model, tokenizer):
                         results = evaluate(args, model, tokenizer)
                         for key, value in results.items():
                             tb_writer.add_scalar('eval_{}'.format(key), value, global_step)
+                        if cl_train_dataset:
+                            results = evaluate(args, model, tokenizer,cl_flag=True)
+                            for key, value in results.items():
+                                tb_writer.add_scalar('Rehersal : eval_{}'.format(key), value, global_step)
                     tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
                     tb_writer.add_scalar('loss', (tr_loss - logging_loss)/args.logging_steps, global_step)
                     logging_loss = tr_loss
@@ -287,11 +320,11 @@ def train(args, train_dataset, model, tokenizer):
     return global_step, tr_loss / global_step
 
 
-def evaluate(args, model, tokenizer, prefix=""):
+def evaluate(args, model, tokenizer, prefix="",cl_flag=False):
     # Loop to handle MNLI double evaluation (matched, mis-matched)
     eval_output_dir = args.output_dir
 
-    eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
+    eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True, cl=cl_flag)
 
     if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(eval_output_dir)
@@ -306,7 +339,7 @@ def evaluate(args, model, tokenizer, prefix=""):
         model = torch.nn.DataParallel(model)
 
     # Eval!
-    logger.info("***** Running evaluation {} *****".format(prefix))
+    logger.info("***** Running evaluation {0} ***** CL_FLAG {1}".format(prefix,cl_flag))
     logger.info("  Num examples = %d", len(eval_dataset))
     logger.info("  Batch size = %d", args.eval_batch_size)
     eval_loss = 0.0
@@ -333,7 +366,7 @@ def evaluate(args, model, tokenizer, prefix=""):
 
     output_eval_file = os.path.join(eval_output_dir, prefix, "eval_results.txt")
     with open(output_eval_file, "w") as writer:
-        logger.info("***** Eval results {} *****".format(prefix))
+        logger.info("***** Eval results {0} ***** CL_FLAG {1}".format(prefix,cl_flag))
         for key in sorted(result.keys()):
             logger.info("  %s = %s", key, str(result[key]))
             writer.write("%s = %s\n" % (key, str(result[key])))
@@ -345,14 +378,19 @@ def main():
     parser = argparse.ArgumentParser()
 
     ## Required parameters
-    parser.add_argument("--train_data_file", default=None, type=str, required=True,
+    parser.add_argument("--train_data_file", default=None, type=str,required=True,
                         help="The input training data file (a text file).")
-    parser.add_argument("--output_dir", default=None, type=str, required=True,
+    parser.add_argument("--output_dir", default=None, type=str,required=True,
                         help="The output directory where the model predictions and checkpoints will be written.")
 
     ## Other parameters
+    parser.add_argument("--cl_train_data_file", default=None, type=str,required=False,
+                        help="The input cl training data file (a text file).")
     parser.add_argument("--eval_data_file", default=None, type=str,
                         help="An optional input evaluation data file to evaluate the perplexity on (a text file).")
+
+    parser.add_argument("--cl_eval_data_file", default=None, type=str,
+                        help="An optional input evaluation cl data file to evaluate the perplexity on (a text file).")
 
     parser.add_argument("--model_type", default="bert", type=str,
                         help="The model architecture to be fine-tuned.")
@@ -385,12 +423,17 @@ def main():
 
     parser.add_argument("--per_gpu_train_batch_size", default=4, type=int,
                         help="Batch size per GPU/CPU for training.")
+    parser.add_argument("--cl_per_gpu_train_batch_size", default=1, type=int,
+                        help="Batch size per CL GPU/CPU for training.")
     parser.add_argument("--per_gpu_eval_batch_size", default=4, type=int,
                         help="Batch size per GPU/CPU for evaluation.")
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                         help="Number of updates steps to accumulate before performing a backward/update pass.")
     parser.add_argument("--learning_rate", default=5e-5, type=float,
                         help="The initial learning rate for Adam.")
+
+    parser.add_argument("--cl_loss_multiplier",default=0.1,type=float,
+                        help="The loss multiplier")
     parser.add_argument("--weight_decay", default=0.0, type=float,
                         help="Weight deay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float,
@@ -501,11 +544,15 @@ def main():
             torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training process the dataset, and the others will use the cache
 
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
+        if args.cl_train_data_file is not None:
+            cl_train_dataset=load_and_cache_examples(args, tokenizer, evaluate=False,cl=True)
+        else:
+            cl_train_dataset=None
 
         if args.local_rank == 0:
             torch.distributed.barrier()
 
-        global_step, tr_loss = train(args, train_dataset, model, tokenizer)
+        global_step, tr_loss = train(args, train_dataset, model, tokenizer,cl_train_dataset=cl_train_dataset)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
 
@@ -548,6 +595,10 @@ def main():
             result = evaluate(args, model, tokenizer, prefix=prefix)
             result = dict((k + '_{}'.format(global_step), v) for k, v in result.items())
             results.update(result)
+            if cl_train_dataset is not None:
+                result = evaluate(args, model, tokenizer, cl_flag=True)
+                result = dict(('Rehersal'+k + '_{}'.format(global_step), v) for k, v in result.items())
+                results.update(result)
 
     return results
 
