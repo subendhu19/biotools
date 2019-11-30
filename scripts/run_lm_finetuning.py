@@ -34,6 +34,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
+import copy
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -163,7 +164,12 @@ def mask_tokens(inputs, tokenizer, args):
     return inputs, labels
 
 
-def train(args, train_dataset, model, tokenizer):
+def get_distill_loss(current_label_outs, base_label_outs, labels):
+    loss = (-1 * base_label_outs * torch.log(current_label_outs + 1e-30)).sum(axis=2) * (labels > 0)
+    return torch.mean(loss)
+
+
+def train(args, train_dataset, model, distil_model, tokenizer):
     """ Train the model """
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
@@ -196,12 +202,16 @@ def train(args, train_dataset, model, tokenizer):
     # multi-gpu training (should be after apex fp16 initialization)
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
+        distil_model = torch.nn.DataParallel(distil_model)
 
     # Distributed training (should be after apex fp16 initialization)
     if args.local_rank != -1:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
                                                           output_device=args.local_rank,
                                                           find_unused_parameters=True)
+        distil_model = torch.nn.parallel.DistributedDataParallel(distil_model, device_ids=[args.local_rank],
+                                                                 output_device=args.local_rank,
+                                                                 find_unused_parameters=True)
 
     # Train!
     logger.info("***** Running training *****")
@@ -216,6 +226,7 @@ def train(args, train_dataset, model, tokenizer):
     global_step = 0
     tr_loss, logging_loss = 0.0, 0.0
     model.resize_token_embeddings(len(tokenizer))
+    distil_model.resize_token_embeddings(len(tokenizer))
     model.zero_grad()
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
@@ -226,8 +237,13 @@ def train(args, train_dataset, model, tokenizer):
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
             model.train()
+            distil_model.eval()
             outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
-            loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+            with torch.no_grad():
+                distil_outputs = distil_model(inputs, masked_lm_labels=labels) if args.mlm else distil_model(inputs, labels=labels)
+
+            distil_loss = get_distill_loss(outputs[1], distil_outputs[1], labels)
+            loss = outputs[0] + distil_loss  # model outputs are always tuple in transformers (see doc)
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -489,6 +505,7 @@ def main():
                                         config=config,
                                         cache_dir=args.cache_dir if args.cache_dir else None)
     model.to(args.device)
+    distil_model = copy.deepcopy(model)
 
     if args.local_rank == 0:
         torch.distributed.barrier()  # End of barrier to make sure only the first process in distributed training download model & vocab
@@ -505,7 +522,7 @@ def main():
         if args.local_rank == 0:
             torch.distributed.barrier()
 
-        global_step, tr_loss = train(args, train_dataset, model, tokenizer)
+        global_step, tr_loss = train(args, train_dataset, model, distil_model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
 
