@@ -243,7 +243,7 @@ def train(args, train_dataset, model, distil_model, tokenizer):
                 distil_outputs = distil_model(inputs, masked_lm_labels=labels) if args.mlm else distil_model(inputs, labels=labels)
 
             distil_loss = get_distill_loss(outputs[1], distil_outputs[1], labels)
-            loss = outputs[0] + distil_loss  # model outputs are always tuple in transformers (see doc)
+            loss = outputs[0] + args.cl_loss_multiplier * distil_loss  # model outputs are always tuple in transformers (see doc)
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -446,6 +446,8 @@ def main():
                         help="For distributed training: local_rank")
     parser.add_argument('--server_ip', type=str, default='', help="For distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="For distant debugging.")
+    parser.add_argument("--cl_loss_multiplier", default=0.1, type=float,
+                        help="The loss multiplier")
     args = parser.parse_args()
 
     if args.model_type in ["bert", "roberta", "distilbert"] and not args.mlm:
