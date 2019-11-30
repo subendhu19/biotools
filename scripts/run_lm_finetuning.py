@@ -51,7 +51,14 @@ from transformers import (WEIGHTS_NAME, AdamW, get_linear_schedule_with_warmup,
                                   DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer)
 
 
+from torch import nn
+
 logger = logging.getLogger(__name__)
+
+
+class MyDataParallel(nn.DataParallel):
+    def __getattr__(self, name):
+        return getattr(self.module, name)
 
 
 MODEL_CLASSES = {
@@ -201,8 +208,8 @@ def train(args, train_dataset, model, distil_model, tokenizer):
 
     # multi-gpu training (should be after apex fp16 initialization)
     if args.n_gpu > 1:
-        model = torch.nn.DataParallel(model)
-        distil_model = torch.nn.DataParallel(distil_model)
+        model = MyDataParallel(model)
+        distil_model = MyDataParallel(distil_model)
 
     # Distributed training (should be after apex fp16 initialization)
     if args.local_rank != -1:
@@ -319,7 +326,7 @@ def evaluate(args, model, tokenizer, prefix=""):
 
     # multi-gpu evaluate
     if args.n_gpu > 1:
-        model = torch.nn.DataParallel(model)
+        model = MyDataParallel(model)
 
     # Eval!
     logger.info("***** Running evaluation {} *****".format(prefix))
