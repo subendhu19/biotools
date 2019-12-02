@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
 #SBATCH --job-name=bio_finetune
-#SBATCH --output=bio_roberta_dis.txt
+#SBATCH --output=bio_bert_dis.txt
 #SBATCH --time=7-00:00
 
 python scripts/run_lm_finetuning.py \
-    --output_dir=checkpoints/bio-roberta-dis \
-    --model_type=roberta \
-    --model_name_or_path=roberta-base \
+    --output_dir=checkpoints/bio-bert-dis \
+    --model_type=bert \
+    --model_name_or_path=bert-base-cased \
     --do_train \
     --train_data_file=data/train1.txt \
     --do_eval \

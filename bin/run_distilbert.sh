@@ -10,7 +10,7 @@ python scripts/run_lm_finetuning.py \
     --model_name_or_path=distilbert-base-uncased \
     --do_train \
     --do_lower_case \
-    --train_data_file=data/train.txt \
+    --train_data_file=data/train1.txt \
     --do_eval \
     --evaluate_during_training \
     --logging_steps=25000 \
@@ -19,5 +19,5 @@ python scripts/run_lm_finetuning.py \
     --mlm \
     --num_train_epochs=10 \
     --save_total_limit=10 \
-    --per_gpu_train_batch_size=4 \
-    --per_gpu_eval_batch_size=8
+    --per_gpu_train_batch_size=3 \
+    --per_gpu_eval_batch_size=6
