@@ -19,5 +19,5 @@ python scripts/run_lm_finetuning.py \
     --mlm \
     --num_train_epochs=10 \
     --save_total_limit=10 \
-    --per_gpu_train_batch_size=5 \
-    --per_gpu_eval_batch_size=10
+    --per_gpu_train_batch_size=4 \
+    --per_gpu_eval_batch_size=8
