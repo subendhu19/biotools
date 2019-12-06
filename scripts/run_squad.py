@@ -47,11 +47,11 @@ from transformers import (WEIGHTS_NAME, BertConfig,
                                   AlbertConfig, AlbertForQuestionAnswering, AlbertTokenizer,
                                   RobertaConfig, RobertaTokenizer)
 
-from .roberta_qa import RobertaForQuestionAnswering
+from roberta_qa import RobertaForQuestionAnswering
 
 from transformers import AdamW, get_linear_schedule_with_warmup
 
-from .utils_squad import (read_squad_examples, convert_examples_to_features,
+from utils_squad import (read_squad_examples, convert_examples_to_features,
                          RawResult, write_predictions,
                          RawResultExtended, write_predictions_extended)
 
