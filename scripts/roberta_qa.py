@@ -9,7 +9,7 @@ from torch.nn import CrossEntropyLoss
 from transformers.modeling_bert import BertPreTrainedModel
 from transformers.file_utils import add_start_docstrings
 
-from transformers.modeling_roberta import RobertaModel, ROBERTA_INPUTS_DOCSTRING, ROBERTA_START_DOCSTRING
+from transformers.modeling_roberta import RobertaConfig, RobertaModel, ROBERTA_INPUTS_DOCSTRING, ROBERTA_START_DOCSTRING
 logger = logging.getLogger(__name__)
 
 ROBERTA_PRETRAINED_MODEL_ARCHIVE_MAP = {
@@ -61,6 +61,11 @@ class RobertaForQuestionAnswering(BertPreTrainedModel):
         print(' '.join(all_tokens[torch.argmax(start_scores) : torch.argmax(end_scores)+1]))
         # a nice puppet
     """
+
+    config_class = RobertaConfig
+    pretrained_model_archive_map = ROBERTA_PRETRAINED_MODEL_ARCHIVE_MAP
+    base_model_prefix = "roberta"
+
     def __init__(self, config):
         super(RobertaForQuestionAnswering, self).__init__(config)
         self.num_labels = config.num_labels
