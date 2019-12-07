@@ -9,4 +9,7 @@ python run_snli.py --data_dir=/mnt/nfs/work1/mfiterau/brawat/snli/data/snli_1.0 
 --max_seq_length=200 \
 --do_lower_case \
 --do_train \
---do_eval
+--do_eval \
+--save_steps=15000 \
+--num_train_epochs=3 \
+--warmup_steps=9000
