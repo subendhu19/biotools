@@ -403,6 +403,8 @@ def main():
                         help="For distributed training: local_rank")
     parser.add_argument('--server_ip', type=str, default='', help="For distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="For distant debugging.")
+    parser.add_argument('--do_test_run', action='store_true',
+                        help="Does a test run with smaller train and test set")
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(
