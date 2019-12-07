@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH -n 5
 #SBATCH -N 1
-#SBATCH --mem=10000
+#SBATCH --mem=40000
 
-#SBATCH -o /mnt/nfs/work1/hongyu/abhyuday/logs/evl/exp_%A_%a.out
-#SBATCH -e /mnt/nfs/work1/hongyu/abhyuday/logs/evl/exp_%A_%a.err
+#SBATCH -o /mnt/nfs/scratch1/brawat/logs/exp_%A_%a.out
+#SBATCH -e /mnt/nfs/scratch1/brawat/logs/exp_%A_%a.err
 
 #module load cuda92
 #eval "$('/home/abhyuday/local/miniconda3/bin/conda' 'shell.bash' 'hook' 2> /dev/null)"
@@ -13,6 +13,7 @@
 echo "Starting the execution of task $SLURM_JOBID"
 echo $CUDA_VISIBLE_DEVICES
 
+INPUTFILE=/mnt/nfs/scratch1/abhyuday/models.csv
 DATADIR=/mnt/nfs/work1/mfiterau/brawat/snli/data/snli_1.0
 CACHEDIR=/mnt/nfs/scratch1/brawat/cache
 #OUTPUTDIR=/home/abhyuday/scratch/cl_evl/chkpnts
@@ -37,7 +38,7 @@ $PY_PATH run_snli.py --data_dir= $DATADIR\
 --config_name $MODELNAME \
 --tokenizer_name $MODELNAME \
 --language=english \
---output_dir=$OUTPUTDIR/squad_${INSTANCENAME}/ \
+--output_dir=$OUTPUTDIR/snli_${INSTANCENAME}/ \
 --cache=$CACHEDIR \
 --max_seq_length=200 \
 --do_lower_case \
@@ -45,13 +46,14 @@ $PY_PATH run_snli.py --data_dir= $DATADIR\
 --do_eval \
 --save_steps=15000 \
 --num_train_epochs=3 \
---warmup_steps=9000 \
 --overwrite_output_dir \
 --overwrite_cache \
 --per_gpu_train_batch_size=20 \
 --per_gpu_eval_batch_size=20 \
 ${EXTRA}
 
+
+#--warmup_steps=9000 \
 #$PY_PATH scripts/run_squad.py \
 #  --model_type $MODELTYPE \
 #  --model_name_or_path ${CHECKPOINT} \
