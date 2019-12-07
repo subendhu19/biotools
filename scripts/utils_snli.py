@@ -69,6 +69,16 @@ class SnliProcessor(DataProcessor):
         """See base class."""
         return ["contradiction", "entailment", "neutral"]
 
+    def simple_accuracy(preds, labels):
+        return (preds == labels).mean()
+
+    def xnli_compute_metrics(task_name, preds, labels):
+        assert len(preds) == len(labels)
+        if task_name == "xnli":
+            return {"acc": simple_accuracy(preds, labels)}
+        else:
+            raise KeyError(task_name)
+
 xnli_processors = {
     "xnli": XnliProcessor,
 }
@@ -80,3 +90,13 @@ xnli_output_modes = {
 xnli_tasks_num_labels = {
     "xnli": 3,
 }
+
+def simple_accuracy(preds, labels):
+    return (preds == labels).mean()
+
+def xnli_compute_metrics(task_name, preds, labels):
+    assert len(preds) == len(labels)
+    if task_name == "xnli":
+        return {"acc": simple_accuracy(preds, labels)}
+    else:
+        raise KeyError(task_name)

@@ -45,8 +45,8 @@ from transformers import (WEIGHTS_NAME,
 
 from transformers import AdamW, get_linear_schedule_with_warmup
 
-from transformers import xnli_compute_metrics as compute_metrics
-from transformers import xnli_output_modes as output_modes
+from transformers.data.processors import xnli_output_modes as output_modes
+from utils_snli import xnli_compute_metrics as compute_metrics
 from utils_snli import SnliProcessor as processors
 
 from transformers import glue_convert_examples_to_features as convert_examples_to_features
