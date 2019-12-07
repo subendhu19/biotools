@@ -14,9 +14,9 @@ echo "Starting the execution of task $SLURM_JOBID"
 echo $CUDA_VISIBLE_DEVICES
 
 DATADIR=/mnt/nfs/work1/mfiterau/brawat/snli/data/snli_1.0
-CACHEDIR=
+CACHEDIR=/mnt/nfs/scratch1/brawat/cache
 #OUTPUTDIR=/home/abhyuday/scratch/cl_evl/chkpnts
-OUTPUTDIR=
+OUTPUTDIR=/mnt/nfs/scratch1/brawat/ckpts
 PY_PATH=/home/brawat/miniconda3/envs/snli/bin/python
 
 
@@ -38,7 +38,7 @@ $PY_PATH run_snli.py --data_dir= $DATADIR\
 --tokenizer_name $MODELNAME \
 --language=english \
 --output_dir=$OUTPUTDIR/squad_${INSTANCENAME}/ \
---cache=/mnt/nfs/work1/mfiterau/brawat/snli/cache \
+--cache=$CACHEDIR \
 --max_seq_length=200 \
 --do_lower_case \
 --do_train \
