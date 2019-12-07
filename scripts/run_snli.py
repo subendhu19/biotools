@@ -441,9 +441,10 @@ def main():
 
     # Prepare XNLI task
     args.task_name = 'xnli'
-    if args.task_name not in processors:
-        raise ValueError("Task not found: %s" % (args.task_name))
-    processor = processors[args.task_name](language=args.language, train_language=args.train_language)
+    # if args.task_name not in processors:
+    #     raise ValueError("Task not found: %s" % (args.task_name))
+    # processor = processors[args.task_name](language=args.language, train_language=args.train_language)
+    processor = processors()
     args.output_mode = output_modes[args.task_name]
     label_list = processor.get_labels()
     num_labels = len(label_list)
