@@ -53,9 +53,9 @@ class SnliProcessor(DataProcessor):
         for (i, line) in enumerate(lines):
             if i == 0:
                 continue
-            language = line[0]
-            if language != self.language:
-                continue
+            # language = line[0]
+            # if language != self.language:
+            #     continue
             guid = "%s-%s" % ('test', i)
             text_a = line['sentence1']
             text_b = line['sentence2']
