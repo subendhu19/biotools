@@ -26,8 +26,8 @@ class SnliProcessor(DataProcessor):
         """See base class."""
         # lg = self.language if self.train_language is None else self.train_language
         # lines = self._read_tsv(os.path.join(data_dir, "XNLI-MT-1.0/multinli/multinli.train.{}.tsv".format(lg)))
-        train_data = read_data(join(data_dir, 'snli_1.0_train.jsonl'))
-        dev_data = read_data(join(data_dir, 'snli_1.0_dev.jsonl'))
+        train_data = self.read_data(join(data_dir, 'snli_1.0_train.jsonl'))
+        dev_data = self.read_data(join(data_dir, 'snli_1.0_dev.jsonl'))
         lines = train_data+dev_data
         lines = [x for x in lines if(x['gold_label']!='-')]
         examples = []
