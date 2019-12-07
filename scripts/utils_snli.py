@@ -47,7 +47,7 @@ class SnliProcessor(DataProcessor):
     def get_test_examples(self, data_dir):
         """See base class."""
         # lines = self._read_tsv(os.path.join(data_dir, "XNLI-1.0/xnli.test.tsv"))
-        lines = read_data(join(data_dir, 'snli_1.0_test.jsonl'))
+        lines = self.read_data(join(data_dir, 'snli_1.0_test.jsonl'))
         lines = [x for x in lines if (x['gold_label'] != '-')]
         examples = []
         for (i, line) in enumerate(lines):

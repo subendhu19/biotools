@@ -13,5 +13,6 @@ python run_snli.py --data_dir=/mnt/nfs/work1/mfiterau/brawat/snli/data/snli_1.0 
 --save_steps=15000 \
 --num_train_epochs=3 \
 --warmup_steps=9000 \
+--overwrite_output_dir \
 --per_gpu_train_batch_size=20 \
 --per_gpu_eval_batch_size=20
