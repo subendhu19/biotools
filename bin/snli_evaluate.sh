@@ -32,7 +32,7 @@ echo $INSTANCENAME
 
 cd /mnt/nfs/work1/mfiterau/brawat/snli/biotools
 
-$PY_PATH scripts/run_snli.py --data_dir= $DATADIR\
+$PY_PATH scripts/run_snli.py --data_dir=$DATADIR \
 --model_type=$MODELTYPE \
 --model_name_or_path=${CHECKPOINT} \
 --config_name $MODELNAME \
