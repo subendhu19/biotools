@@ -79,9 +79,9 @@ class SnliProcessor(DataProcessor):
         else:
             raise KeyError(task_name)
 
-xnli_processors = {
-    "xnli": XnliProcessor,
-}
+# xnli_processors = {
+#     "xnli": XnliProcessor,
+# }
 
 xnli_output_modes = {
     "xnli": "classification",
