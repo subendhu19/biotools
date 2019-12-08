@@ -13,7 +13,7 @@
 echo "Starting the execution of task $SLURM_JOBID"
 echo $CUDA_VISIBLE_DEVICES
 
-INPUTFILE=/mnt/nfs/scratch1/abhyuday/models.csv
+INPUTFILE=/mnt/nfs/scratch1/abhyuday/modelsv2.csv
 DATADIR=/mnt/nfs/work1/mfiterau/brawat/snli/data/snli_1.0
 CACHEDIR=/mnt/nfs/scratch1/brawat/cache
 #OUTPUTDIR=/home/abhyuday/scratch/cl_evl/chkpnts
@@ -41,7 +41,6 @@ $PY_PATH scripts/run_snli.py --data_dir=$DATADIR \
 --output_dir=$OUTPUTDIR/snli_${INSTANCENAME}/ \
 --cache=$CACHEDIR \
 --max_seq_length=200 \
---do_lower_case \
 --do_train \
 --do_eval \
 --save_steps=15000 \

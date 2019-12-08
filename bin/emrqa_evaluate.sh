@@ -10,7 +10,6 @@ echo "Starting the execution of task $SLURM_JOBID"
 echo $CUDA_VISIBLE_DEVICES
 
 
-
 INPUTFILE=/mnt/nfs/scratch1/abhyuday/modelsv2.csv
 TRAINF=/mnt/nfs/work1/mfiterau/brawat/emrqa_data_biotool/data_squad_biotools/train.json
 TESTF=//mnt/nfs/work1/mfiterau/brawat/emrqa_data_biotool/data_squad_biotools/test.json
