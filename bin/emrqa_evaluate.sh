@@ -46,10 +46,8 @@ python scripts/run_squad.py \
   --doc_stride 128 \
   --save_steps=10000 \
   --output_dir $OUTPUTDIR/squad_${INSTANCENAME}/ \
-  --version_2_with_negative \
   --overwrite_output_dir \
-  --overwrite_cache
-  ${EXTRA}
+  --overwrite_cache ${EXTRA}
 
 echo $V
 
