@@ -38,7 +38,7 @@ python scripts/run_squad.py \
   --do_train \
   --do_eval \
   --train_file $TRAINF \
-  --predict_file $TRAINF \
+  --predict_file $TESTF \
   --per_gpu_train_batch_size 12 \
   --learning_rate 3e-5 \
   --num_train_epochs 3.0 \
