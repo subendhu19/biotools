@@ -6,8 +6,6 @@
 #SBATCH -o /mnt/nfs/scratch1/srongali/emrqa_logs/exp_%A_%a.out
 #SBATCH -e /mnt/nfs/scratch1/srongali/emrqa_logs/exp_%A_%a.err
 
-conda activate bioembeddings
-
 echo "Starting the execution of task $SLURM_JOBID"
 echo $CUDA_VISIBLE_DEVICES
 
