@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -n 5
 #SBATCH -N 1
-#SBATCH --mem=10000
+#SBATCH --mem=30000
 
 #SBATCH -o /mnt/nfs/scratch1/srongali/emrqa_logs/exp_%A_%a.out
 #SBATCH -e /mnt/nfs/scratch1/srongali/emrqa_logs/exp_%A_%a.err
@@ -44,7 +44,7 @@ python scripts/run_squad.py \
   --num_train_epochs 3.0 \
   --max_seq_length 384 \
   --doc_stride 128 \
-  --save_steps=10000 \
+  --save_steps=200000 \
   --output_dir $OUTPUTDIR/squad_${INSTANCENAME}/ \
   --overwrite_output_dir \
   --overwrite_cache ${EXTRA}
