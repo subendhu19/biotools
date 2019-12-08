@@ -241,7 +241,7 @@ def evaluate(args, model, tokenizer, prefix=""):
                       'attention_mask': batch[1]
                       }
             if args.model_type != 'distilbert':
-                inputs['token_type_ids'] = None if args.model_type == ['xlm', 'roberta'] else batch[2]  # XLM don't use segment_ids
+                inputs['token_type_ids'] = None if args.model_type in ['xlm', 'roberta'] else batch[2]  # XLM don't use segment_ids
             example_indices = batch[3]
             if args.model_type in ['xlnet', 'xlm']:
                 inputs.update({'cls_index': batch[4],
