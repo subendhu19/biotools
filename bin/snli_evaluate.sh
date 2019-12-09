@@ -13,6 +13,7 @@
 echo "Starting the execution of task $SLURM_JOBID"
 echo $CUDA_VISIBLE_DEVICES
 
+
 INPUTFILE=/mnt/nfs/scratch1/abhyuday/modelsv3.csv
 DATADIR=/mnt/nfs/work1/mfiterau/brawat/snli/data/snli_1.0
 CACHEDIR=/mnt/nfs/scratch1/brawat/v2/cache
