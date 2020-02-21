@@ -96,7 +96,7 @@ def get_diag_fisher(model,old_task_dataset_len,old_task_dataset_iterator,args,to
         if src_device==-1:
             outputs = model(cl_inputs,masked_lm_labels=cl_labels)
         else:
-            outputs = data_parallel(model, {'input_ids':cl_inputs,'masked_lm_labels': cl_labels}, device_ids=None, output_device=src_device)
+            outputs = data_parallel(model,cl_inputs,module_kwargs={'masked_lm_labels': cl_labels}, device_ids=None, output_device=src_device)
         loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
         if args.n_gpu > 1:
@@ -116,6 +116,8 @@ def get_diag_fisher(model,old_task_dataset_len,old_task_dataset_iterator,args,to
 def penalty(model,means,precision_matrices):
     loss = 0
     for n, p in model.named_parameters():
+        if n.startswith('module.'):
+            n=n.replace('module.','')
         if n in precision_matrices:
             relevant_fisher=precision_matrices[n]
             _loss =  (p - means[n]) ** 2
@@ -342,12 +344,14 @@ def train(args, train_dataset, model, tokenizer, cl_train_dataset = None):
                 loss = loss / args.gradient_accumulation_steps
 
             if cl_train_dataset and args.ewc:
+                #import pdb;pdb.set_trace()
                 ewc_penalty=penalty(model, ewc_means, ewc_F)
 
                 if step%50000 in [0,1,2]:
                     print('Showing loss components for few steps Loss: {0}, EWC_Loss {1}, effective EWC_Loss {2}'.format(loss,ewc_penalty,args.cl_loss_multiplier*ewc_penalty))
+                #print('Showing loss components for few steps Loss: {0}, EWC_Loss {1}, effective EWC_Loss {2}'.format(loss,ewc_penalty,args.cl_loss_multiplier*ewc_penalty))
 
-                loss += args.cl_loss_multiplier * ewc_penalty
+                loss += float(args.cl_loss_multiplier) * ewc_penalty
 
             if args.fp16:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -586,7 +590,7 @@ def main():
 
     # Setup CUDA, GPU & distributed training
     if args.local_rank == -1 or args.no_cuda:
-        device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+        device = torch.device("cuda:0" if torch.cuda.is_available() and not args.no_cuda else "cpu")
         args.n_gpu = torch.cuda.device_count()
     else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.cuda.set_device(args.local_rank)
