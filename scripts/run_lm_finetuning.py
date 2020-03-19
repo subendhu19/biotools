@@ -96,6 +96,9 @@ def get_diag_fisher(model,old_task_dataset_len,old_task_dataset_iterator,args,to
         if src_device==-1:
             outputs = model(cl_inputs,masked_lm_labels=cl_labels)
         else:
+            #if len(devices)==1:
+            #    outputs=model(cl_inputs,masked_lm_labels=cl_labels)
+            #else:
             outputs = data_parallel(model,cl_inputs,module_kwargs={'masked_lm_labels': cl_labels}, device_ids=None, output_device=src_device)
         loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
@@ -113,15 +116,16 @@ def get_diag_fisher(model,old_task_dataset_len,old_task_dataset_iterator,args,to
     precision_matrices = {n: p for n, p in precision_matrices.items()}
     return means,precision_matrices
 
-def penalty(model,means,precision_matrices):
+def penalty(model,means,precision_matrices,ewc_type):
     loss = 0
     for n, p in model.named_parameters():
         if n.startswith('module.'):
             n=n.replace('module.','')
         if n in precision_matrices:
-            relevant_fisher=precision_matrices[n]
             _loss =  (p - means[n]) ** 2
-            _loss = _loss*relevant_fisher
+            if ewc_type==1:
+                relevant_fisher=precision_matrices[n]
+                _loss = _loss*relevant_fisher
             loss += _loss.sum()
     return loss
 
@@ -217,7 +221,7 @@ def mask_tokens(inputs, tokenizer, args):
     special_tokens_mask = [tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in labels.tolist()]
     probability_matrix.masked_fill_(torch.tensor(special_tokens_mask, dtype=torch.bool), value=0.0)
     masked_indices = torch.bernoulli(probability_matrix).bool()
-    labels[~masked_indices] = -1  # We only compute loss on masked tokens
+    labels[~masked_indices] = -100  # We only compute loss on masked tokens
 
     # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
     indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
@@ -345,9 +349,9 @@ def train(args, train_dataset, model, tokenizer, cl_train_dataset = None):
 
             if cl_train_dataset and args.ewc:
                 #import pdb;pdb.set_trace()
-                ewc_penalty=penalty(model, ewc_means, ewc_F)
+                ewc_penalty=penalty(model, ewc_means, ewc_F,ewc_type=args.ewc_type)
 
-                if step%50000 in [0,1,2]:
+                if step%50000 in [0,1,2,3,4,5,6,7,8,9,10,11]:
                     print('Showing loss components for few steps Loss: {0}, EWC_Loss {1}, effective EWC_Loss {2}'.format(loss,ewc_penalty,args.cl_loss_multiplier*ewc_penalty))
                 #print('Showing loss components for few steps Loss: {0}, EWC_Loss {1}, effective EWC_Loss {2}'.format(loss,ewc_penalty,args.cl_loss_multiplier*ewc_penalty))
 
@@ -477,6 +481,7 @@ def main():
 
     ## Other parameters
     parser.add_argument("--ewc", action='store_true', help="Whether to run ewc CL training.")
+    parser.add_argument("--ewc_type", default=100, type=int,help="0:default EWC, 1: EWC with constant diagonal precision of 1 (L2) 2: Kronecker factorization")
     parser.add_argument("--num_ewc_steps", default=100, type=int,
                         help="Total number of steps to perform for estimating the EWC Laplace Approximation. Entire dataset is used if -1")
     parser.add_argument("--cl_train_data_file", default=None, type=str,required=False,
@@ -635,8 +640,10 @@ def main():
 
     # Training
     if args.do_train:
+        # Deleted this. revert.
+        #torch.distributed.barrier()  # End of barrier to make sure only the first process in distributed training download model & vocab
         if args.local_rank not in [-1, 0]:
-            torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training process the dataset, and the others will use the cache
+            torch.distributed.barrier()  # End of barrier to make sure only the first process in distributed training download model & vocab
 
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
         if args.cl_train_data_file is not None:
