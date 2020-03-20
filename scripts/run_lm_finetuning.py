@@ -106,6 +106,7 @@ def scatter_kwargs(inputs, kwargs, target_gpus, dim=0, chunk_sizes=None):
 class CustomDataParallel(torch.nn.DataParallel):
     def __init__(self, module, device_ids=None, output_device=None, dim=0, chunk_sizes=None):
         torch.nn.DataParallel.__init__(self, module, device_ids=device_ids, output_device=output_device, dim=dim)
+        logger.info('Setting up custom version of DataParallel with init chunk_size of {0}'.format(chunk_sizes))
         self.chunk_sizes = chunk_sizes
 
     def scatter(self, inputs, kwargs, device_ids):
