@@ -337,8 +337,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     if cl_train_dataset and args.ewc_type !=1:
         cl_train_sampler = RandomSampler(cl_train_dataset) if args.local_rank == -1 else \
             DistributedSampler(cl_train_dataset)
-        cl_batch_size= args.cl_train_batch_size if args.ewc else args.train_batch_size
-
+        cl_batch_size= sum(cl_train_chunk_sizes)
+        
         # Dropping last batch because of unknown behavior from scatter using specific chunk sizes.
         cl_train_dataloader = DataLoader(
             cl_train_dataset, sampler=cl_train_sampler, batch_size=cl_batch_size, collate_fn=collate,drop_last=True
