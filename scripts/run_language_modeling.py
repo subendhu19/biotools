@@ -40,8 +40,7 @@ from torch.nn.parallel import data_parallel
 
 from copy import deepcopy
 from torch.autograd import Variable
-from run_lm_finetuning import CustomDataParallel, scatter, scatter_kwargs
-from custom_data_parallel import custom_data_parallel
+from custom_data_parallel import custom_data_parallel, CustomDataParallel
 
 GRAD_CLIP_VALUE_EWC=10
 
