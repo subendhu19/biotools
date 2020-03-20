@@ -161,8 +161,9 @@ def get_l2_norm_materials(model,args):
 
     return means,precision_matrices
 
-def get_diag_fisher(model,old_task_dataset_len,old_task_dataset_iterator,args,tokenizer):
+def get_diag_fisher(model,old_task_dataset_len,old_task_dataset_iterator,args,tokenizer,chunk_sizes):
     logger.info('Computing Diagonal Fisher estimates for EWC ...')
+    logger.info('EWC computation chunks sizes {0}'.format(chunk_sizes))
     #cl_epoch_iterator = iter(old_task_dataset_iterator)
     cl_epoch_iterator = tqdm(old_task_dataset_iterator, desc="Iteration")
     params = {n: p for n, p in model.named_parameters() if p.requires_grad and "LayerNorm" not in n}
@@ -190,7 +191,7 @@ def get_diag_fisher(model,old_task_dataset_len,old_task_dataset_iterator,args,to
             #if len(devices)==1:
             #    outputs=model(cl_inputs,masked_lm_labels=cl_labels)
             #else:
-            outputs = data_parallel(model,cl_inputs,module_kwargs={'masked_lm_labels': cl_labels}, device_ids=None, output_device=src_device)
+            outputs = custom_data_parallel(model,cl_inputs,module_kwargs={'masked_lm_labels': cl_labels}, device_ids=None, output_device=src_device,chunk_sizes=chunk_sizes)
         loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
         if args.n_gpu > 1:
             loss = loss.mean()
@@ -320,6 +321,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                            * max(0, args.n_gpu-1)
     args.cl_train_batch_size = sum(cl_train_chunk_sizes)
 
+    logger.info('Train chunk size distribution is {0}, total batch size is {1}'.format(train_chunk_sizes,args.train_batch_size))
+    logger.info('CL Train chunk size distribution is {0}, total batch size is {1}'.format(cl_train_chunk_sizes,args.cl_train_batch_size))
+
     def collate(examples: List[torch.Tensor]):
         if tokenizer._pad_token is None:
             return pad_sequence(examples, batch_first=True)
@@ -384,7 +388,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             assert cl_train_dataset is not None, "CL dataset needed for EWC"
             ewc_means, ewc_F = get_diag_fisher(model, old_task_dataset_len=len(cl_train_dataset),
                                                old_task_dataset_iterator=cl_train_dataloader, args=args,
-                                               tokenizer=tokenizer)
+                                               tokenizer=tokenizer,chunk_sizes=cl_train_chunk_sizes)
 
         elif args.ewc_type ==1:
             ewc_means, ewc_F = get_l2_norm_materials(model,args)
