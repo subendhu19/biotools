@@ -795,6 +795,24 @@ def main():
     parser.add_argument("--server_port", type=str, default="", help="For distant debugging.")
     args = parser.parse_args()
 
+    # ------ CL Configuration checks -------
+    if args.ewc is False:
+        if args.ewc_type==0:
+            print('**** REHEARSAL CONTINUAL LEARNING MODE ******')
+        elif args.ewc_type ==1:
+            raise ValueError(" If ewc is off, ewc_type should point to the default value of 0")
+        else:
+            raise ValueError(" ewc_type value not supported")
+    else:
+        if args.ewc_type==0:
+            print('**** EWC CONTINUAL LEARNING MODE ******')
+        elif args.ewc_type ==1:
+            print('**** L2 CONTINUAL LEARNING MODE ******')
+        else:
+            raise ValueError(" ewc_type value not supported")
+
+
+
     if args.model_type in ["bert", "roberta", "distilbert", "camembert"] and not args.mlm:
         raise ValueError(
             "BERT and RoBERTa-like models do not have LM heads but masked LM heads. They must be run using the --mlm "
