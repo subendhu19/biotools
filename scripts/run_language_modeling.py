@@ -40,6 +40,8 @@ from torch.nn.parallel import data_parallel
 
 from copy import deepcopy
 from torch.autograd import Variable
+from run_lm_finetuning import CustomDataParallel, scatter, scatter_kwargs
+from custom_data_parallel import custom_data_parallel
 
 GRAD_CLIP_VALUE_EWC=10
 
@@ -69,8 +71,6 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
-from run_lm_finetuning import CustomDataParallel,scatter,scatter_kwargs
-
 try:
     from torch.utils.tensorboard import SummaryWriter
 except ImportError:
@@ -89,49 +89,6 @@ MODEL_CLASSES = {
     "camembert": (CamembertConfig, CamembertForMaskedLM, CamembertTokenizer),
 }
 
-
-
-def custom_data_parallel(module, inputs, device_ids=None, output_device=None, dim=0, module_kwargs=None,chunk_sizes=None):
-    r"""Evaluates module(input) in parallel across the GPUs given in device_ids.
-
-    This is the functional version of the DataParallel module.
-
-    Args:
-        module (Module): the module to evaluate in parallel
-        inputs (Tensor): inputs to the module
-        device_ids (list of int or torch.device): GPU ids on which to replicate module
-        output_device (list of int or torch.device): GPU location of the output  Use -1 to indicate the CPU.
-            (default: device_ids[0])
-    Returns:
-        a Tensor containing the result of module(input) located on
-        output_device
-    """
-    if not isinstance(inputs, tuple):
-        inputs = (inputs,)
-
-    if device_ids is None:
-        device_ids = list(range(torch.cuda.device_count()))
-
-    if output_device is None:
-        output_device = device_ids[0]
-
-    device_ids = list(map(lambda x: _get_device_index(x, True), device_ids))
-    output_device = _get_device_index(output_device, True)
-    src_device_obj = torch.device("cuda:{}".format(device_ids[0]))
-
-    for t in chain(module.parameters(), module.buffers()):
-        if t.device != src_device_obj:
-            raise RuntimeError("module must have its parameters and buffers "
-                               "on device {} (device_ids[0]) but found one of "
-                               "them on device: {}".format(src_device_obj, t.device))
-
-    inputs, module_kwargs = scatter_kwargs(inputs, module_kwargs, device_ids, dim,chunk_sizes)
-    if len(device_ids) == 1:
-        return module(*inputs[0], **module_kwargs[0])
-    used_device_ids = device_ids[:len(inputs)]
-    replicas = replicate(module, used_device_ids)
-    outputs = parallel_apply(replicas, inputs, module_kwargs, used_device_ids)
-    return gather(outputs, output_device, dim)
 
 class TextDataset(Dataset):
     def __init__(self, tokenizer: PreTrainedTokenizer, args, file_path: str, block_size=512):
@@ -356,8 +313,12 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
 
-    args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-    args.cl_train_batch_size = args.cl_per_gpu_train_batch_size * max(1, args.n_gpu)
+    train_chunk_sizes=[args.main_gpu_train_batch_size] + [args.per_gpu_train_batch_size]* max(0, args.n_gpu-1)
+
+    args.train_batch_size = sum(train_chunk_sizes)
+    cl_train_chunk_sizes = [args.cl_main_gpu_train_batch_size] + [args.cl_per_gpu_train_batch_size]\
+                           * max(0, args.n_gpu-1)
+    args.cl_train_batch_size = sum(cl_train_chunk_sizes)
 
     def collate(examples: List[torch.Tensor]):
         if tokenizer._pad_token is None:
@@ -365,14 +326,19 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
 
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+
+    # Dropping last batch because of unknown behavior from scatter using specific chunk sizes.
     train_dataloader = DataLoader(
-        train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, collate_fn=collate
+        train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, collate_fn=collate,drop_last=True
     )
     if cl_train_dataset and args.ewc_type !=1:
-        cl_train_sampler = RandomSampler(cl_train_dataset) if args.local_rank == -1 else DistributedSampler(cl_train_dataset)
+        cl_train_sampler = RandomSampler(cl_train_dataset) if args.local_rank == -1 else \
+            DistributedSampler(cl_train_dataset)
         cl_batch_size= args.cl_train_batch_size if args.ewc else args.train_batch_size
+
+        # Dropping last batch because of unknown behavior from scatter using specific chunk sizes.
         cl_train_dataloader = DataLoader(
-            cl_train_dataset, sampler=cl_train_sampler, batch_size=cl_batch_size, collate_fn=collate
+            cl_train_dataset, sampler=cl_train_sampler, batch_size=cl_batch_size, collate_fn=collate,drop_last=True
         )
 
     if args.max_steps > 0:
@@ -440,12 +406,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     logger.info("  Num examples = %d", len(train_dataset))
     logger.info("  Num Epochs = %d", args.num_train_epochs)
     logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
-    logger.info(
-        "  Total train batch size (w. parallel, distributed & accumulation) = %d",
-        args.train_batch_size
-        * args.gradient_accumulation_steps
-        * (torch.distributed.get_world_size() if args.local_rank != -1 else 1),
-    )
+    logger.info("  Instantaneous batch size source GPU = %d", args.main_gpu_train_batch_size)
+
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
@@ -494,6 +456,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             labels = labels.to(args.device)
             # model.train()
             model.module.train() if hasattr(model, 'module') else model.train()
+            model.chunk_sizes = train_chunk_sizes
             outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
             loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
@@ -511,6 +474,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 cl_inputs = cl_inputs.to(args.device)
                 cl_labels = cl_labels.to(args.device)
                 model.module.train() if hasattr(model, 'module') else model.train()
+                model.chunk_sizes = cl_train_chunk_sizes
                 cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else model(cl_inputs,
                                                                                                  labels=cl_labels)
                 loss += cl_outputs[0] * args.cl_loss_multiplier
@@ -601,13 +565,14 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
     # Loop to handle MNLI double evaluation (matched, mis-matched)
     eval_output_dir = args.output_dir
+    eval_chunk_sizes = [args.main_gpu_eval_batch_size] + [args.per_gpu_eval_batch_size] * max(0, args.n_gpu - 1)
 
     eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
 
     if args.local_rank in [-1, 0]:
         os.makedirs(eval_output_dir, exist_ok=True)
 
-    args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
+    args.eval_batch_size = sum(eval_chunk_sizes)
     # Note that DistributedSampler samples randomly
 
     def collate(examples: List[torch.Tensor]):
@@ -617,7 +582,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
 
     eval_sampler = SequentialSampler(eval_dataset)
     eval_dataloader = DataLoader(
-        eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size, collate_fn=collate
+        eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size, collate_fn=collate, drop_last=True
     )
 
     # multi-gpu evaluate
@@ -631,6 +596,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     eval_loss = 0.0
     nb_eval_steps = 0
     model.eval()
+    model.chunk_sizes=eval_chunk_sizes
 
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
         inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
@@ -753,8 +719,15 @@ def main():
     parser.add_argument("--cl_per_gpu_train_batch_size", default=1, type=int,
                         help="Batch size per CL GPU/CPU for training.")
 
+    parser.add_argument("--main_gpu_train_batch_size", default=1, type=int, help="Batch size of the source GPU for training.")
+    parser.add_argument("--cl_main_gpu_train_batch_size", default=1, type=int,
+                        help="Batch size the source CL GPU for training.")
+
     parser.add_argument(
         "--per_gpu_eval_batch_size", default=4, type=int, help="Batch size per GPU/CPU for evaluation."
+    )
+    parser.add_argument(
+        "--main_gpu_eval_batch_size", default=2, type=int, help="Batch size of the source GPU  for evaluation."
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
