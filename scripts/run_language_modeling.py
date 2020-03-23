@@ -307,8 +307,13 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> T
     return inputs, labels
 
 
+def get_distill_loss(current_label_outs, base_label_outs, labels):
+    loss = (-1 * base_label_outs * torch.log(current_label_outs + 1e-30)).sum(axis=2) * (labels > 0)
+    return torch.mean(loss)
+
+
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer,
-          cl_train_dataset=None) -> Tuple[int, float]:
+          cl_train_dataset=None, distil_model=None) -> Tuple[int, float]:
     """ Train the model """
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
@@ -398,12 +403,18 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
     if args.n_gpu > 1:
         #model = torch.nn.DataParallel(model)
         model = CustomDataParallel(model)
+        if distil_model is not None:
+            distil_model = CustomDataParallel(distil_model)
 
     # Distributed training (should be after apex fp16 initialization)
     if args.local_rank != -1:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True
         )
+        if distil_model is not None:
+            distil_model = torch.nn.parallel.DistributedDataParallel(
+                distil_model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True
+            )
 
     # Train!
     logger.info("***** Running training *****")
@@ -444,6 +455,13 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         epochs_trained, int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0]
     )
     set_seed(args)  # Added here for reproducibility
+
+    if distil_model is not None:
+        distil_model_to_resize = distil_model.module if hasattr(distil_model, "module") else distil_model
+        distil_model_to_resize.eval()  # No gradients for the distil model
+        distil_model_to_resize.resize_token_embeddings(len(tokenizer))
+        distil_model.chunk_sizes = cl_train_chunk_sizes
+
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         if cl_train_dataset and args.ewc_type!=1:
@@ -465,7 +483,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
 
-            # Rehearsal mechanism
+            # Rehearsal or Distillation mechanism
             #-----------------------------
             if cl_train_dataset and args.ewc is False:  # cl dataset provided and EWC is off. So rehersal is on.
                 try:
@@ -474,14 +492,34 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     logger.info('Completed CL train batch iteration. Restarting ...')
                     cl_epoch_iterator = iter(cl_train_dataloader)
                     cl_batch = next(cl_epoch_iterator)
-                cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) if args.mlm else (cl_batch, cl_batch)
-                cl_inputs = cl_inputs.to(args.device)
-                cl_labels = cl_labels.to(args.device)
-                model.module.train() if hasattr(model, 'module') else model.train()
-                model.chunk_sizes = cl_train_chunk_sizes
-                cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else model(cl_inputs,
-                                                                                                 labels=cl_labels)
-                loss += cl_outputs[0] * args.cl_loss_multiplier
+
+                if distil_model is not None:
+                    # Distillation mechanism
+                    # -----------------------------
+                    cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) if args.mlm else (cl_batch, cl_batch)
+                    cl_inputs = cl_inputs.to(args.device)
+                    cl_labels = cl_labels.to(args.device)
+
+                    cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else \
+                        model(cl_inputs, labels=cl_labels)
+
+                    distil_outputs = distil_model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else \
+                        distil_model(cl_inputs, labels=cl_labels)
+
+                    distil_loss = get_distill_loss(cl_outputs[1], distil_outputs[1], labels)
+                    logger.info(distil_loss)
+                    loss += distil_loss * args.cl_loss_multiplier
+                else:
+                    # Rehearsal mechanism
+                    # -----------------------------
+                    cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) if args.mlm else (cl_batch, cl_batch)
+                    cl_inputs = cl_inputs.to(args.device)
+                    cl_labels = cl_labels.to(args.device)
+                    model.module.train() if hasattr(model, 'module') else model.train()
+                    model.chunk_sizes = cl_train_chunk_sizes
+                    cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else model(cl_inputs,
+                                                                                                     labels=cl_labels)
+                    loss += cl_outputs[0] * args.cl_loss_multiplier
             #-----------------------------
 
             if args.n_gpu > 1:
@@ -675,6 +713,13 @@ def main():
     )
     parser.add_argument(
         "--model_name_or_path",
+        default=None,
+        type=str,
+        help="The model checkpoint for weights initialization. Leave None if you want to train a model from scratch.",
+    )
+
+    parser.add_argument(
+        "--distil_model_name_or_path",
         default=None,
         type=str,
         help="The model checkpoint for weights initialization. Leave None if you want to train a model from scratch.",
@@ -920,6 +965,17 @@ def main():
         logger.info("Training new model from scratch")
         model = model_class(config=config)
 
+    if args.distil_model_name_or_path is not None:
+        logger.info("Distillation model provided. Loading")
+        distil_config = config_class.from_pretrained(args.distil_model_name_or_path, cache_dir=args.cache_dir)
+        distil_model = model_class.from_pretrained(
+            args.distil_model_name_or_path,
+            from_tf=bool(".ckpt" in args.distil_model_name_or_path),
+            config=distil_config,
+            cache_dir=args.cache_dir,
+        )
+        distil_model.to(args.device)
+
     model.to(args.device)
 
     if args.local_rank == 0:
@@ -941,7 +997,8 @@ def main():
         if args.local_rank == 0:
             torch.distributed.barrier()
 
-        global_step, tr_loss = train(args, train_dataset, model, tokenizer,cl_train_dataset=cl_train_dataset)
+        global_step, tr_loss = train(args, train_dataset, model, tokenizer, cl_train_dataset=cl_train_dataset,
+                                     distil_model=distil_model)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
     # Saving best-practices: if you use save_pretrained for the model and tokenizer, you can reload them using from_pretrained()
