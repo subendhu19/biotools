@@ -510,7 +510,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                         distil_model(cl_inputs, labels=cl_labels)
 
                     distil_loss = get_distill_loss(cl_outputs[1], distil_outputs[1], cl_labels)
-                    loss += distil_loss # Distillation loss will not have a multiplier since its almost in the same range
+                    loss += distil_loss * args.cl_loss_multiplier
                 else:
                     # Rehearsal mechanism
                     # -----------------------------
