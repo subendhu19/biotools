@@ -308,7 +308,9 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> T
 
 
 def get_distill_loss(current_label_outs, base_label_outs, labels):
-    loss = (-1 * base_label_outs * torch.log(current_label_outs + 1e-30)).sum(axis=2) * (labels > 0)
+    s = torch.nn.Softmax(dim=2)
+    ls = torch.nn.LogSoftmax(dim=2)
+    loss = (-1 * s(base_label_outs) * ls(current_label_outs + 1e-30)).sum(axis=2) * (labels > 0)
     return torch.mean(loss)
 
 
@@ -500,6 +502,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     cl_inputs = cl_inputs.to(args.device)
                     cl_labels = cl_labels.to(args.device)
 
+                    model.chunk_sizes = cl_train_chunk_sizes
                     cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else \
                         model(cl_inputs, labels=cl_labels)
 
@@ -507,8 +510,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                         distil_model(cl_inputs, labels=cl_labels)
 
                     distil_loss = get_distill_loss(cl_outputs[1], distil_outputs[1], labels)
-                    logger.info(distil_loss)
-                    loss += distil_loss * args.cl_loss_multiplier
+                    loss += distil_loss # Distillation loss will not have a multiplier since its almost in the same range
                 else:
                     # Rehearsal mechanism
                     # -----------------------------
@@ -843,7 +845,10 @@ def main():
     # ------ CL Configuration checks -------
     if args.ewc is False:
         if args.ewc_type==0:
-            print('**** REHEARSAL CONTINUAL LEARNING MODE ******')
+            if args.distil_model_name_or_path is not None:
+                print('**** DISTILLATION CONTINUAL LEARNING MODE ******')
+            else:
+                print('**** REHEARSAL CONTINUAL LEARNING MODE ******')
         elif args.ewc_type ==1:
             raise ValueError(" If ewc is off, ewc_type should point to the default value of 0")
         else:
