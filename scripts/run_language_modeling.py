@@ -980,6 +980,8 @@ def main():
             cache_dir=args.cache_dir,
         )
         distil_model.to(args.device)
+    else:
+        distil_model = None
 
     model.to(args.device)
 
