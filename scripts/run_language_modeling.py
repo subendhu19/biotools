@@ -761,6 +761,7 @@ def main():
 
     ## Other parameters
     parser.add_argument("--ewc", action='store_true', help="Whether to run ewc CL training.")
+    parser.add_argument("--gem", action='store_true', help="Whether to run gem CL training.")
     parser.add_argument("--ewc_type", default=0, type=int,
                         help="0:default EWC, 1: EWC with constant diagonal precision of 1 (L2) 2: Kronecker factorization")
     parser.add_argument("--num_ewc_steps", default=100, type=int,
