@@ -328,8 +328,10 @@ def project2cone(gradient,memories):
     memories=memories.squeeze()
     unnormalized_projection = torch.dot(gradient,memories)
     if (unnormalized_projection <0).sum()==0:
+        #print('UP: {0}, not violated'.format(unnormalized_projection))
         return gradient,False
     else:
+        #print('UP: {0}, violated'.format(unnormalized_projection))
         constrained_vector = gradient - (unnormalized_projection/ torch.norm(memories,p=2)) * memories
 
         return constrained_vector, True
@@ -508,7 +510,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             grad_dims.append(param.data.numel())
         grads_memory = torch.Tensor(sum(grad_dims),)
         current_task_grad = torch.Tensor(sum(grad_dims),)
-        if args.cuda:
+        if torch.cuda.is_available():
             grads_memory = grads_memory.cuda()
             current_task_grad = current_task_grad.cuda()
 
@@ -584,8 +586,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                         model.chunk_sizes = cl_train_chunk_sizes
                         cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm \
                             else model(cl_inputs,labels=cl_labels)
-                        cl_loss=cl_outputs[0]
-                        cl_loss.backwards()
+                        cl_loss=cl_outputs[0].mean()
+                        cl_loss.backward()
                         obtain_grads(grads_memory,model)
                         model.module.zero_grad() if hasattr(model, 'module') else model.zero_grad()
 
@@ -615,6 +617,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             else:
                 loss.backward()
 
+            #GEM mechanism
+            #-----------------------------
             if args.gem is True:
                 obtain_grads(current_task_grad,model)
                 projected_grad, violation = project2cone(current_task_grad,grads_memory)
