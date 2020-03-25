@@ -29,7 +29,7 @@ import random
 import re
 import shutil
 from typing import Dict, List, Tuple
-
+import copy
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -313,6 +313,44 @@ def get_distill_loss(current_label_outs, base_label_outs, labels):
     loss = (-1 * s(base_label_outs) * ls(current_label_outs + 1e-30)).sum(axis=2) * (labels > 0)
     return torch.mean(loss)
 
+def project2cone(gradient,memories):
+    # original code can be obtained from
+    # https://github.com/facebookresearch/GradientEpisodicMemory/blob/master/model/gem.py
+    # The above implementation required a quadprog solver which runs on cpu.
+    # This would be too slow for our setup (moving grads gpu->cpu, quadprog(), and then cpu->gpu)
+    # For only one memory gradient, we just use direct projection.
+    # GEM's dual quad program requires projection onto a convex cone.
+    # If we only have one previous memory gradient, there is no cone and this can be solved analytically
+    # instead of running quadprog.
+    if memories.numel() != gradient.numel():
+        assert False,"specialized for only one memory gradient "
+    gradient=gradient.squeeze()
+    memories=memories.squeeze()
+    unnormalized_projection = torch.dot(gradient,memories)
+    if (unnormalized_projection <0).sum()==0:
+        return gradient,False
+    else:
+        constrained_vector = gradient - (unnormalized_projection/ torch.norm(memories,p=2)) * memories
+
+        return constrained_vector, True
+
+
+
+def obtain_grads(grads_memory,model):
+    count=0
+    for param in model.parameters():
+        num_elements= param.numel()
+        grads_memory[count: count+num_elements].copy_(param.grad.data.view(-1))
+        count+=num_elements
+
+def overwrite_grads(model,grad_vec):
+    count=0
+    for param in model.parameters():
+        num_elements= param.numel()
+        this_grad = grad_vec[count: count+num_elements].contiguous().view(
+            param.grad.data.size())
+        param.grad.data.copy_(this_grad)
+        count+=num_elements
 
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer,
           cl_train_dataset=None, distil_model=None) -> Tuple[int, float]:
@@ -464,6 +502,16 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         distil_model_to_resize.resize_token_embeddings(len(tokenizer))
         distil_model.chunk_sizes = cl_train_chunk_sizes
 
+    if args.gem is True:
+        grad_dims = []
+        for param in model.parameters():
+            grad_dims.append(param.data.numel())
+        grads_memory = torch.Tensor(sum(grad_dims),)
+        current_task_grad = torch.Tensor(sum(grad_dims),)
+        if args.cuda:
+            grads_memory = grads_memory.cuda()
+            current_task_grad = current_task_grad.cuda()
+
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         if cl_train_dataset and args.ewc_type!=1:
@@ -513,16 +561,34 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     distil_loss = get_distill_loss(cl_outputs[1], distil_outputs[1], cl_labels)
                     loss += distil_loss * args.cl_loss_multiplier
                 else:
-                    # Rehearsal mechanism
-                    # -----------------------------
-                    cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) if args.mlm else (cl_batch, cl_batch)
-                    cl_inputs = cl_inputs.to(args.device)
-                    cl_labels = cl_labels.to(args.device)
-                    model.module.train() if hasattr(model, 'module') else model.train()
-                    model.chunk_sizes = cl_train_chunk_sizes
-                    cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else model(cl_inputs,
-                                                                                                     labels=cl_labels)
-                    loss += cl_outputs[0] * args.cl_loss_multiplier
+                    if args.gem is False:
+                        # Rehearsal mechanism
+                        # -----------------------------
+                        cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) if args.mlm else (cl_batch, cl_batch)
+                        cl_inputs = cl_inputs.to(args.device)
+                        cl_labels = cl_labels.to(args.device)
+                        model.module.train() if hasattr(model, 'module') else model.train()
+                        model.chunk_sizes = cl_train_chunk_sizes
+                        cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else model(cl_inputs,
+                                                                                                         labels=cl_labels)
+                        loss += cl_outputs[0] * args.cl_loss_multiplier
+                    else:
+                        # GRADIENT EPISODIC MEMORY.
+                        # Rehearsal mechanism with gradient projection. Without explicit loss constraints.
+                        # -----------------------------
+                        cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) \
+                            if args.mlm else (cl_batch, cl_batch)
+                        cl_inputs = cl_inputs.to(args.device)
+                        cl_labels = cl_labels.to(args.device)
+                        model.module.train() if hasattr(model, 'module') else model.train()
+                        model.chunk_sizes = cl_train_chunk_sizes
+                        cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm \
+                            else model(cl_inputs,labels=cl_labels)
+                        cl_loss=cl_outputs[0]
+                        cl_loss.backwards()
+                        obtain_grads(grads_memory,model)
+                        model.module.zero_grad() if hasattr(model, 'module') else model.zero_grad()
+
             #-----------------------------
 
             if args.n_gpu > 1:
@@ -548,6 +614,11 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     scaled_loss.backward()
             else:
                 loss.backward()
+
+            if args.gem is True:
+                obtain_grads(current_task_grad,model)
+                projected_grad, violation = project2cone(current_task_grad,grads_memory)
+                overwrite_grads(model, projected_grad)
 
             tr_loss += loss.item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -849,14 +920,22 @@ def main():
     if args.ewc is False:
         if args.ewc_type==0:
             if args.distil_model_name_or_path is not None:
-                print('**** DISTILLATION CONTINUAL LEARNING MODE ******')
+                if args.gem is True:
+                    raise ValueError(" Why are you using GEM with distill model ?")
+                else:
+                    print('**** DISTILLATION CONTINUAL LEARNING MODE ******')
             else:
-                print('**** REHEARSAL CONTINUAL LEARNING MODE ******')
+                if args.gem is True:
+                    print('**** GRADIENT EPISODIC MEMORY CONTINUAL LEARNING MODE ******')
+                else:
+                    print('**** REHEARSAL CONTINUAL LEARNING MODE ******')
         elif args.ewc_type ==1:
             raise ValueError(" If ewc is off, ewc_type should point to the default value of 0")
         else:
             raise ValueError(" ewc_type value not supported")
     else:
+        if args.gem is True:
+            raise ValueError(" Why are you using GEM with EWC ?")
         if args.ewc_type==0:
             print('**** EWC CONTINUAL LEARNING MODE ******')
         elif args.ewc_type ==1:
