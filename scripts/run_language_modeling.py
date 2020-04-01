@@ -518,6 +518,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         if cl_train_dataset and args.ewc_type!=1:
             cl_epoch_iterator = iter(cl_train_dataloader)
+        skipped_batches = 0
         for step, batch in enumerate(epoch_iterator):
 
             # Skip past any already trained steps if resuming training
@@ -525,74 +526,79 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                 steps_trained_in_current_epoch -= 1
                 continue
 
-            inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
-            inputs = inputs.to(args.device)
-            labels = labels.to(args.device)
-            # model.train()
-            model.module.train() if hasattr(model, 'module') else model.train()
-            model.chunk_sizes = train_chunk_sizes
-            outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
-            loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+            try:
+                inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+                inputs = inputs.to(args.device)
+                labels = labels.to(args.device)
+                # model.train()
+                model.module.train() if hasattr(model, 'module') else model.train()
+                model.chunk_sizes = train_chunk_sizes
+                outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
+                loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
 
-            # Rehearsal or Distillation mechanism
-            #-----------------------------
-            if cl_train_dataset and args.ewc is False:  # cl dataset provided and EWC is off. So rehersal is on.
-                try:
-                    cl_batch = next(cl_epoch_iterator)
-                except StopIteration:
-                    logger.info('Completed CL train batch iteration. Restarting ...')
-                    cl_epoch_iterator = iter(cl_train_dataloader)
-                    cl_batch = next(cl_epoch_iterator)
+                # Rehearsal or Distillation mechanism
+                #-----------------------------
+                if cl_train_dataset and args.ewc is False:  # cl dataset provided and EWC is off. So rehersal is on.
+                    try:
+                        cl_batch = next(cl_epoch_iterator)
+                    except StopIteration:
+                        logger.info('Completed CL train batch iteration. Restarting ...')
+                        cl_epoch_iterator = iter(cl_train_dataloader)
+                        cl_batch = next(cl_epoch_iterator)
 
-                if distil_model is not None:
-                    # Distillation mechanism
-                    # -----------------------------
-                    cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) if args.mlm else (cl_batch, cl_batch)
-                    cl_inputs = cl_inputs.to(args.device)
-                    cl_labels = cl_labels.to(args.device)
-
-                    model.chunk_sizes = cl_train_chunk_sizes
-                    cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else \
-                        model(cl_inputs, labels=cl_labels)
-
-                    with torch.no_grad():
-                        distil_outputs = distil_model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else \
-                            distil_model(cl_inputs, labels=cl_labels)
-
-                    distil_loss = get_distill_loss(cl_outputs[1], distil_outputs[1], cl_labels)
-                    loss += distil_loss * args.cl_loss_multiplier
-                else:
-                    if args.gem is False:
-                        # Rehearsal mechanism
+                    if distil_model is not None:
+                        # Distillation mechanism
                         # -----------------------------
                         cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) if args.mlm else (cl_batch, cl_batch)
                         cl_inputs = cl_inputs.to(args.device)
                         cl_labels = cl_labels.to(args.device)
-                        model.module.train() if hasattr(model, 'module') else model.train()
+
                         model.chunk_sizes = cl_train_chunk_sizes
-                        cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else model(cl_inputs,
-                                                                                                         labels=cl_labels)
-                        loss += cl_outputs[0] * args.cl_loss_multiplier
+                        cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else \
+                            model(cl_inputs, labels=cl_labels)
+
+                        with torch.no_grad():
+                            distil_outputs = distil_model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else \
+                                distil_model(cl_inputs, labels=cl_labels)
+
+                        distil_loss = get_distill_loss(cl_outputs[1], distil_outputs[1], cl_labels)
+                        loss += distil_loss * args.cl_loss_multiplier
                     else:
-                        # GRADIENT EPISODIC MEMORY.
-                        # Rehearsal mechanism with gradient projection. Without explicit loss constraints.
-                        # -----------------------------
-                        cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) \
-                            if args.mlm else (cl_batch, cl_batch)
-                        cl_inputs = cl_inputs.to(args.device)
-                        cl_labels = cl_labels.to(args.device)
-                        model.module.train() if hasattr(model, 'module') else model.train()
-                        model.chunk_sizes = cl_train_chunk_sizes
-                        cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm \
-                            else model(cl_inputs,labels=cl_labels)
-                        cl_loss=cl_outputs[0].mean()
-                        cl_loss.backward()
-                        obtain_grads(grads_memory,model)
-                        model.module.zero_grad() if hasattr(model, 'module') else model.zero_grad()
+                        if args.gem is False:
+                            # Rehearsal mechanism
+                            # -----------------------------
+                            cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) if args.mlm else (cl_batch, cl_batch)
+                            cl_inputs = cl_inputs.to(args.device)
+                            cl_labels = cl_labels.to(args.device)
+                            model.module.train() if hasattr(model, 'module') else model.train()
+                            model.chunk_sizes = cl_train_chunk_sizes
+                            cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else model(cl_inputs,
+                                                                                                             labels=cl_labels)
+                            loss += cl_outputs[0] * args.cl_loss_multiplier
+                        else:
+                            # GRADIENT EPISODIC MEMORY.
+                            # Rehearsal mechanism with gradient projection. Without explicit loss constraints.
+                            # -----------------------------
+                            cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) \
+                                if args.mlm else (cl_batch, cl_batch)
+                            cl_inputs = cl_inputs.to(args.device)
+                            cl_labels = cl_labels.to(args.device)
+                            model.module.train() if hasattr(model, 'module') else model.train()
+                            model.chunk_sizes = cl_train_chunk_sizes
+                            cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm \
+                                else model(cl_inputs,labels=cl_labels)
+                            cl_loss=cl_outputs[0].mean()
+                            cl_loss.backward()
+                            obtain_grads(grads_memory,model)
+                            model.module.zero_grad() if hasattr(model, 'module') else model.zero_grad()
+
+            except RuntimeError:
+                torch.cuda.empty_cache()
+                skipped_batches += 1
+                continue
 
             #-----------------------------
-
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
             if args.gradient_accumulation_steps > 1:
@@ -673,6 +679,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
                 break
+
+        logger.info("Skipped total %d batches due to runtime errors", skipped_batches)
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
