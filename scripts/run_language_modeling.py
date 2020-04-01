@@ -947,10 +947,10 @@ def main():
         config = config_class()
 
     if args.tokenizer_name:
-        tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name, do_lower_case=args.do_lower_case,
+        tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name,
                                                     cache_dir=args.cache_dir)
     elif args.model_name_or_path:
-        tokenizer = tokenizer_class.from_pretrained(args.model_name_or_path, do_lower_case=args.do_lower_case,
+        tokenizer = tokenizer_class.from_pretrained(args.model_name_or_path,
                                                     cache_dir=args.cache_dir)
     else:
         raise ValueError(
@@ -1033,7 +1033,7 @@ def main():
 
         # Load a trained model and vocabulary that you have fine-tuned
         model = model_class.from_pretrained(args.output_dir)
-        tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        tokenizer = tokenizer_class.from_pretrained(args.output_dir)
         model.to(args.device)
 
     # Evaluation
