@@ -36,13 +36,6 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
-from torch.nn.parallel import data_parallel
-
-from copy import deepcopy
-from torch.autograd import Variable
-from custom_data_parallel import custom_data_parallel, CustomDataParallel
-
-GRAD_CLIP_VALUE_EWC=10
 
 from transformers import (
     WEIGHTS_NAME,
@@ -69,6 +62,7 @@ from transformers import (
     RobertaTokenizer,
     get_linear_schedule_with_warmup,
 )
+
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -150,79 +144,8 @@ class LineByLineTextDataset(Dataset):
         return torch.tensor(self.examples[i], dtype=torch.long)
 
 
-def get_l2_norm_materials(model,args):
-    params = {n: p for n, p in model.named_parameters() if p.requires_grad and "LayerNorm" not in n}
-    means = {}
-    precision_matrices = {}
-    for n, p in params.items():
-        means[n] = p.clone().detach()
-        precision_matrices[n]= None
-
-    return means,precision_matrices
-
-def get_diag_fisher(model,old_task_dataset_len,old_task_dataset_iterator,args,tokenizer,chunk_sizes):
-    logger.info('Computing Diagonal Fisher estimates for EWC ...')
-    logger.info('EWC computation chunks sizes {0}'.format(chunk_sizes))
-    #cl_epoch_iterator = iter(old_task_dataset_iterator)
-    cl_epoch_iterator = tqdm(old_task_dataset_iterator, desc="Iteration")
-    params = {n: p for n, p in model.named_parameters() if p.requires_grad and "LayerNorm" not in n}
-    if torch.cuda.is_available():
-        devices=list(set([p.device for n, p in model.named_parameters() if p.requires_grad]))
-        src_device=devices[0]
-        if devices.__len__()>1:
-            logger.warning('Model is in {0} devices. Behavior may be unstable for device>1'.format(devices))
-    else:
-        src_device= -1
-    means = {}
-    precision_matrices = {}
-    for n, p in params.items():
-        means[n] = p.clone().detach()
-        precision_matrices[n] = torch.zeros_like(p,dtype=p.dtype,device=p.device)
-    model.eval()
-    for step_idx,batch in enumerate(cl_epoch_iterator):
-        model.zero_grad()
-        cl_inputs, cl_labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
-        cl_inputs = cl_inputs.to(args.device)
-        cl_labels = cl_labels.to(args.device)
-        if src_device==-1:
-            outputs = model(cl_inputs,masked_lm_labels=cl_labels)
-        else:
-            #if len(devices)==1:
-            #    outputs=model(cl_inputs,masked_lm_labels=cl_labels)
-            #else:
-            outputs = custom_data_parallel(model,cl_inputs,module_kwargs={'masked_lm_labels': cl_labels}, device_ids=None, output_device=src_device,chunk_sizes=chunk_sizes)
-        loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
-        if args.n_gpu > 1:
-            loss = loss.mean()
-        loss.backward()
-        with torch.no_grad():
-            for n, p in model.named_parameters():
-                if p.grad is not None and n in precision_matrices:
-                    ## Clamping not mentioned in any EWC code or paper, but pretty sure this will be an issue in deep NLP archs.
-                    precision_matrices[n] += \
-                        torch.clamp(p.grad.data,-GRAD_CLIP_VALUE_EWC,GRAD_CLIP_VALUE_EWC) ** 2 / old_task_dataset_len
-    precision_matrices = {n: p for n, p in precision_matrices.items()}
-    return means,precision_matrices
-
-
-def penalty(model, means, precision_matrices, ewc_type):
-    loss = 0
-    for n, p in model.named_parameters():
-        if n.startswith('module.'):
-            n = n.replace('module.', '')
-        if n in precision_matrices:
-            _loss = (p - means[n]) ** 2
-            if ewc_type == 0:
-                relevant_fisher = precision_matrices[n]
-                _loss = _loss * relevant_fisher
-            loss += _loss.sum()
-    return loss
-
-def load_and_cache_examples(args, tokenizer, evaluate=False,cl=False):
-    if cl:
-        file_path = args.cl_eval_data_file if evaluate else args.cl_train_data_file
-    else:
-        file_path = args.eval_data_file if evaluate else args.train_data_file
+def load_and_cache_examples(args, tokenizer, evaluate=False):
+    file_path = args.eval_data_file if evaluate else args.train_data_file
     if args.line_by_line:
         return LineByLineTextDataset(tokenizer, args, file_path=file_path, block_size=args.block_size)
     else:
@@ -307,28 +230,12 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> T
     return inputs, labels
 
 
-def get_distill_loss(current_label_outs, base_label_outs, labels):
-    s = torch.nn.Softmax(dim=2)
-    ls = torch.nn.LogSoftmax(dim=2)
-    loss = (-1 * s(base_label_outs) * ls(current_label_outs + 1e-30)).sum(axis=2) * (labels > 0)
-    return torch.mean(loss)
-
-
-def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer,
-          cl_train_dataset=None, distil_model=None) -> Tuple[int, float]:
+def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> Tuple[int, float]:
     """ Train the model """
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
 
-    train_chunk_sizes=[args.main_gpu_train_batch_size] + [args.per_gpu_train_batch_size]* max(0, args.n_gpu-1)
-
-    args.train_batch_size = sum(train_chunk_sizes)
-    cl_train_chunk_sizes = [args.cl_main_gpu_train_batch_size] + [args.cl_per_gpu_train_batch_size]\
-                           * max(0, args.n_gpu-1)
-    args.cl_train_batch_size = sum(cl_train_chunk_sizes)
-
-    logger.info('Train chunk size distribution is {0}, total batch size is {1}'.format(train_chunk_sizes,args.train_batch_size))
-    logger.info('CL Train chunk size distribution is {0}, total batch size is {1}'.format(cl_train_chunk_sizes,args.cl_train_batch_size))
+    args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
 
     def collate(examples: List[torch.Tensor]):
         if tokenizer._pad_token is None:
@@ -336,20 +243,9 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
 
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-
-    # Dropping last batch because of unknown behavior from scatter using specific chunk sizes.
     train_dataloader = DataLoader(
-        train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, collate_fn=collate,drop_last=True
+        train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, collate_fn=collate
     )
-    if cl_train_dataset and args.ewc_type !=1:
-        cl_train_sampler = RandomSampler(cl_train_dataset) if args.local_rank == -1 else \
-            DistributedSampler(cl_train_dataset)
-        cl_batch_size= sum(cl_train_chunk_sizes)
-        
-        # Dropping last batch because of unknown behavior from scatter using specific chunk sizes.
-        cl_train_dataloader = DataLoader(
-            cl_train_dataset, sampler=cl_train_sampler, batch_size=cl_batch_size, collate_fn=collate,drop_last=True
-        )
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -388,43 +284,27 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
-    ## Iterating over the old task dataset. Parallel_apply is used. Make sure to keep this before DataParallel call.
-    if args.ewc is True:
-        if args.ewc_type==0:
-            assert cl_train_dataset is not None, "CL dataset needed for EWC"
-            ewc_means, ewc_F = get_diag_fisher(model, old_task_dataset_len=len(cl_train_dataset),
-                                               old_task_dataset_iterator=cl_train_dataloader, args=args,
-                                               tokenizer=tokenizer,chunk_sizes=cl_train_chunk_sizes)
-
-        elif args.ewc_type ==1:
-            ewc_means, ewc_F = get_l2_norm_materials(model,args)
-        else:
-            assert False,"Only 0 and 1 EWC_type options supported"
-
     # multi-gpu training (should be after apex fp16 initialization)
     if args.n_gpu > 1:
-        #model = torch.nn.DataParallel(model)
-        model = CustomDataParallel(model)
-        if distil_model is not None:
-            distil_model = CustomDataParallel(distil_model)
+        model = torch.nn.DataParallel(model)
 
     # Distributed training (should be after apex fp16 initialization)
     if args.local_rank != -1:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True
         )
-        if distil_model is not None:
-            distil_model = torch.nn.parallel.DistributedDataParallel(
-                distil_model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True
-            )
 
     # Train!
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
     logger.info("  Num Epochs = %d", args.num_train_epochs)
     logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
-    logger.info("  Instantaneous batch size source GPU = %d", args.main_gpu_train_batch_size)
-
+    logger.info(
+        "  Total train batch size (w. parallel, distributed & accumulation) = %d",
+        args.train_batch_size
+        * args.gradient_accumulation_steps
+        * (torch.distributed.get_world_size() if args.local_rank != -1 else 1),
+    )
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
@@ -457,17 +337,8 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
         epochs_trained, int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0]
     )
     set_seed(args)  # Added here for reproducibility
-
-    if distil_model is not None:
-        distil_model_to_resize = distil_model.module if hasattr(distil_model, "module") else distil_model
-        distil_model_to_resize.eval()  # No gradients for the distil model
-        distil_model_to_resize.resize_token_embeddings(len(tokenizer))
-        distil_model.chunk_sizes = cl_train_chunk_sizes
-
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
-        if cl_train_dataset and args.ewc_type!=1:
-            cl_epoch_iterator = iter(cl_train_dataloader)
         for step, batch in enumerate(epoch_iterator):
 
             # Skip past any already trained steps if resuming training
@@ -478,70 +349,14 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
             inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
             inputs = inputs.to(args.device)
             labels = labels.to(args.device)
-            # model.train()
-            model.module.train() if hasattr(model, 'module') else model.train()
-            model.chunk_sizes = train_chunk_sizes
+            model.train()
             outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
             loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
-
-
-            # Rehearsal or Distillation mechanism
-            #-----------------------------
-            if cl_train_dataset and args.ewc is False:  # cl dataset provided and EWC is off. So rehersal is on.
-                try:
-                    cl_batch = next(cl_epoch_iterator)
-                except StopIteration:
-                    logger.info('Completed CL train batch iteration. Restarting ...')
-                    cl_epoch_iterator = iter(cl_train_dataloader)
-                    cl_batch = next(cl_epoch_iterator)
-
-                if distil_model is not None:
-                    # Distillation mechanism
-                    # -----------------------------
-                    cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) if args.mlm else (cl_batch, cl_batch)
-                    cl_inputs = cl_inputs.to(args.device)
-                    cl_labels = cl_labels.to(args.device)
-
-                    model.chunk_sizes = cl_train_chunk_sizes
-                    cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else \
-                        model(cl_inputs, labels=cl_labels)
-
-                    with torch.no_grad():
-                        distil_outputs = distil_model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else \
-                            distil_model(cl_inputs, labels=cl_labels)
-
-                    distil_loss = get_distill_loss(cl_outputs[1], distil_outputs[1], cl_labels)
-                    loss += distil_loss * args.cl_loss_multiplier
-                else:
-                    # Rehearsal mechanism
-                    # -----------------------------
-                    cl_inputs, cl_labels = mask_tokens(cl_batch, tokenizer, args) if args.mlm else (cl_batch, cl_batch)
-                    cl_inputs = cl_inputs.to(args.device)
-                    cl_labels = cl_labels.to(args.device)
-                    model.module.train() if hasattr(model, 'module') else model.train()
-                    model.chunk_sizes = cl_train_chunk_sizes
-                    cl_outputs = model(cl_inputs, masked_lm_labels=cl_labels) if args.mlm else model(cl_inputs,
-                                                                                                     labels=cl_labels)
-                    loss += cl_outputs[0] * args.cl_loss_multiplier
-            #-----------------------------
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
-
-            #EWC mechanism
-            #-----------------------------
-            if cl_train_dataset and args.ewc:
-                # import pdb;pdb.set_trace()
-                ewc_penalty = penalty(model, ewc_means, ewc_F, ewc_type=args.ewc_type)
-                if step % 50000 in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]:
-                    print(
-                        'Showing loss components for few steps Loss: {0}, EWC_Loss {1}, effective EWC_Loss {2}'.format(
-                            loss, ewc_penalty, args.cl_loss_multiplier * ewc_penalty))
-                # print('Showing loss components for few steps Loss: {0}, EWC_Loss {1}, effective EWC_Loss {2}'.format(loss,ewc_penalty,args.cl_loss_multiplier*ewc_penalty))
-                loss += float(args.cl_loss_multiplier) * ewc_penalty
-            #-----------------------------
 
             if args.fp16:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -555,8 +370,6 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
                 else:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                    #torch.nn.utils.clip_grad_norm_(model.module.parameters() if hasattr(model, 'module')
-                    #                              else model.parameters(), args.max_grad_norm)
                 optimizer.step()
                 scheduler.step()  # Update learning rate schedule
                 model.zero_grad()
@@ -610,14 +423,13 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefix="") -> Dict:
     # Loop to handle MNLI double evaluation (matched, mis-matched)
     eval_output_dir = args.output_dir
-    eval_chunk_sizes = [args.main_gpu_eval_batch_size] + [args.per_gpu_eval_batch_size] * max(0, args.n_gpu - 1)
 
     eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
 
     if args.local_rank in [-1, 0]:
         os.makedirs(eval_output_dir, exist_ok=True)
 
-    args.eval_batch_size = sum(eval_chunk_sizes)
+    args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     # Note that DistributedSampler samples randomly
 
     def collate(examples: List[torch.Tensor]):
@@ -627,7 +439,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
 
     eval_sampler = SequentialSampler(eval_dataset)
     eval_dataloader = DataLoader(
-        eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size, collate_fn=collate, drop_last=True
+        eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size, collate_fn=collate
     )
 
     # multi-gpu evaluate
@@ -641,7 +453,6 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
     eval_loss = 0.0
     nb_eval_steps = 0
     model.eval()
-    model.chunk_sizes=eval_chunk_sizes
 
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
         inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
@@ -687,21 +498,6 @@ def main():
     )
 
     # Other parameters
-
-    ## Other parameters
-    parser.add_argument("--ewc", action='store_true', help="Whether to run ewc CL training.")
-    parser.add_argument("--ewc_type", default=0, type=int,
-                        help="0:default EWC, 1: EWC with constant diagonal precision of 1 (L2) 2: Kronecker factorization")
-    parser.add_argument("--num_ewc_steps", default=100, type=int,
-                        help="Total number of steps to perform for estimating the EWC Laplace Approximation. Entire dataset is used if -1")
-    parser.add_argument("--cl_train_data_file", default=None, type=str, required=False,
-                        help="The input cl training data file (a text file).")
-
-    parser.add_argument("--cl_eval_data_file", default=None, type=str,
-                        help="An optional input evaluation cl data file to evaluate the perplexity on (a text file).")
-
-    parser.add_argument("--do_lower_case", action='store_true',
-                        help="Set this flag if you are using an uncased model.")
     parser.add_argument(
         "--eval_data_file",
         default=None,
@@ -718,13 +514,6 @@ def main():
     )
     parser.add_argument(
         "--model_name_or_path",
-        default=None,
-        type=str,
-        help="The model checkpoint for weights initialization. Leave None if you want to train a model from scratch.",
-    )
-
-    parser.add_argument(
-        "--distil_model_name_or_path",
         default=None,
         type=str,
         help="The model checkpoint for weights initialization. Leave None if you want to train a model from scratch.",
@@ -770,18 +559,8 @@ def main():
     )
 
     parser.add_argument("--per_gpu_train_batch_size", default=4, type=int, help="Batch size per GPU/CPU for training.")
-    parser.add_argument("--cl_per_gpu_train_batch_size", default=1, type=int,
-                        help="Batch size per CL GPU/CPU for training.")
-
-    parser.add_argument("--main_gpu_train_batch_size", default=1, type=int, help="Batch size of the source GPU for training.")
-    parser.add_argument("--cl_main_gpu_train_batch_size", default=1, type=int,
-                        help="Batch size the source CL GPU for training.")
-
     parser.add_argument(
         "--per_gpu_eval_batch_size", default=4, type=int, help="Batch size per GPU/CPU for evaluation."
-    )
-    parser.add_argument(
-        "--main_gpu_eval_batch_size", default=2, type=int, help="Batch size of the source GPU  for evaluation."
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
@@ -790,8 +569,6 @@ def main():
         help="Number of updates steps to accumulate before performing a backward/update pass.",
     )
     parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
-    parser.add_argument("--cl_loss_multiplier", default=0.1, type=float,
-                        help="The loss multiplier")
     parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
@@ -845,27 +622,6 @@ def main():
     parser.add_argument("--server_port", type=str, default="", help="For distant debugging.")
     args = parser.parse_args()
 
-    # ------ CL Configuration checks -------
-    if args.ewc is False:
-        if args.ewc_type==0:
-            if args.distil_model_name_or_path is not None:
-                print('**** DISTILLATION CONTINUAL LEARNING MODE ******')
-            else:
-                print('**** REHEARSAL CONTINUAL LEARNING MODE ******')
-        elif args.ewc_type ==1:
-            raise ValueError(" If ewc is off, ewc_type should point to the default value of 0")
-        else:
-            raise ValueError(" ewc_type value not supported")
-    else:
-        if args.ewc_type==0:
-            print('**** EWC CONTINUAL LEARNING MODE ******')
-        elif args.ewc_type ==1:
-            print('**** L2 CONTINUAL LEARNING MODE ******')
-        else:
-            raise ValueError(" ewc_type value not supported")
-
-
-
     if args.model_type in ["bert", "roberta", "distilbert", "camembert"] and not args.mlm:
         raise ValueError(
             "BERT and RoBERTa-like models do not have LM heads but masked LM heads. They must be run using the --mlm "
@@ -907,7 +663,7 @@ def main():
     # Setup CUDA, GPU & distributed training
     if args.local_rank == -1 or args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-        args.n_gpu = 0 if args.no_cuda else torch.cuda.device_count()
+        args.n_gpu = torch.cuda.device_count()
     else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
@@ -947,11 +703,9 @@ def main():
         config = config_class()
 
     if args.tokenizer_name:
-        tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name, do_lower_case=args.do_lower_case,
-                                                    cache_dir=args.cache_dir)
+        tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name, cache_dir=args.cache_dir)
     elif args.model_name_or_path:
-        tokenizer = tokenizer_class.from_pretrained(args.model_name_or_path, do_lower_case=args.do_lower_case,
-                                                    cache_dir=args.cache_dir)
+        tokenizer = tokenizer_class.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
     else:
         raise ValueError(
             "You are instantiating a new {} tokenizer. This is not supported, but you can do it from another script, save it,"
@@ -975,19 +729,6 @@ def main():
         logger.info("Training new model from scratch")
         model = model_class(config=config)
 
-    if args.distil_model_name_or_path is not None:
-        logger.info("Distillation model provided. Loading")
-        distil_config = config_class.from_pretrained(args.distil_model_name_or_path, cache_dir=args.cache_dir)
-        distil_model = model_class.from_pretrained(
-            args.distil_model_name_or_path,
-            from_tf=bool(".ckpt" in args.distil_model_name_or_path),
-            config=distil_config,
-            cache_dir=args.cache_dir,
-        )
-        distil_model.to(args.device)
-    else:
-        distil_model = None
-
     model.to(args.device)
 
     if args.local_rank == 0:
@@ -1001,16 +742,11 @@ def main():
             torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training process the dataset, and the others will use the cache
 
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
-        if args.cl_train_data_file is not None and args.ewc_type!=1:
-            cl_train_dataset=load_and_cache_examples(args, tokenizer, evaluate=False,cl=True)
-        else:
-            cl_train_dataset=None
 
         if args.local_rank == 0:
             torch.distributed.barrier()
 
-        global_step, tr_loss = train(args, train_dataset, model, tokenizer, cl_train_dataset=cl_train_dataset,
-                                     distil_model=distil_model)
+        global_step, tr_loss = train(args, train_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
     # Saving best-practices: if you use save_pretrained for the model and tokenizer, you can reload them using from_pretrained()
@@ -1033,7 +769,7 @@ def main():
 
         # Load a trained model and vocabulary that you have fine-tuned
         model = model_class.from_pretrained(args.output_dir)
-        tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        tokenizer = tokenizer_class.from_pretrained(args.output_dir)
         model.to(args.device)
 
     # Evaluation

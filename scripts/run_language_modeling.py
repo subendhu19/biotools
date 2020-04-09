@@ -342,16 +342,20 @@ def obtain_grads(grads_memory,model):
     count=0
     for param in model.parameters():
         num_elements= param.numel()
-        grads_memory[count: count+num_elements].copy_(param.grad.data.view(-1))
+        if param.grad is not None:
+            grads_memory[count: count+num_elements].copy_(param.grad.data.view(-1))
+        else:
+            grads_memory[count: count+num_elements].fill_(0.)
         count+=num_elements
 
 def overwrite_grads(model,grad_vec):
     count=0
     for param in model.parameters():
         num_elements= param.numel()
-        this_grad = grad_vec[count: count+num_elements].contiguous().view(
-            param.grad.data.size())
-        param.grad.data.copy_(this_grad)
+        if param.grad is not None:
+            this_grad = grad_vec[count: count+num_elements].contiguous().view(
+                param.grad.data.size())
+            param.grad.data.copy_(this_grad)
         count+=num_elements
 
 def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer,
