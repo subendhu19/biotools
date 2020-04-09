@@ -593,10 +593,14 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
                             obtain_grads(grads_memory,model)
                             model.module.zero_grad() if hasattr(model, 'module') else model.zero_grad()
 
-            except RuntimeError:
-                torch.cuda.empty_cache()
-                skipped_batches += 1
-                continue
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    logger.info('Skipping step {}'.format(step))
+                    torch.cuda.empty_cache()
+                    skipped_batches += 1
+                    continue
+                else:
+                    raise e
 
             #-----------------------------
             if args.n_gpu > 1:
