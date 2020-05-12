@@ -614,7 +614,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 
             #EWC mechanism
             #-----------------------------
-            if cl_train_dataset and args.ewc:
+            if args.ewc:
                 # import pdb;pdb.set_trace()
                 ewc_penalty = penalty(model, ewc_means, ewc_F, ewc_type=args.ewc_type)
                 if step % 50000 in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]:
