@@ -310,7 +310,7 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> T
 def get_distill_loss(current_label_outs, base_label_outs, labels):
     s = torch.nn.Softmax(dim=2)
     ls = torch.nn.LogSoftmax(dim=2)
-    loss = (-1 * s(base_label_outs) * ls(current_label_outs + 1e-30)).sum(axis=2) * (labels > 0)
+    loss = (-1 * s(base_label_outs) * ls(current_label_outs + 1e-30)).sum(axis=2) * (labels > 0).float()
     return torch.mean(loss)
 
 def project2cone(gradient,memories):
