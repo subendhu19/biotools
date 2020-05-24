@@ -23,6 +23,7 @@ import os
 import random
 import glob
 import timeit
+import pickle
 
 import numpy as np
 import torch
@@ -499,7 +500,6 @@ def main():
                                                 cache_dir=args.cache_dir if args.cache_dir else None)
     model = model_class.from_pretrained(args.model_name_or_path,
                                         from_tf=bool('.ckpt' in args.model_name_or_path),
-                                        config=config,
                                         cache_dir=args.cache_dir if args.cache_dir else None)
 
     if args.local_rank == 0:
@@ -571,6 +571,7 @@ def main():
             results.update(result)
 
     logger.info("Results: {}".format(results))
+    pickle.dump(results, open(os.path.join(args.output_dir, 'results.p'), 'wb'))
 
     return results
 
