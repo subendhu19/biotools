@@ -289,9 +289,12 @@ def load_and_cache_examples(args, task, tokenizer, evaluate=False):
         logger.info("Loading features from cached file %s", cached_features_file)
         if evaluate:
             features = torch.load(cached_features_file)
+            logger.info("Final eval size: %s", str(len(features)))
         else:
             features = torch.load(cached_features_file)
-            breakpoint()
+            final_size = int(args.per_train_data * len(features) / 100)
+            features = features[:final_size]
+            logger.info("Final train size: %s", str(len(features)))
     else:
         logger.info("Creating features from dataset file at %s", args.data_dir)
         label_list = processor.get_labels()
